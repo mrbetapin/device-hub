@@ -113,3 +113,14 @@ pub fn set(on: bool) -> HubResult<()> {
 pub fn set(_on: bool) -> HubResult<()> {
     Err(HubError::Unsupported("autostart"))
 }
+
+/// GUI の起動時に呼ぶ: 自動起動が ON なら、登録先をこの exe と同じフォルダのエージェントに
+/// 更新し (別フォルダの古いビルドを指したままにしない)、エージェントを起動する
+/// (常駐中なら新しい方はすぐ終了する)。
+pub fn ensure_running() {
+    if is_enabled() {
+        if let Err(e) = set(true) {
+            crate::agent_log(&format!("エージェントの起動に失敗: {e}"));
+        }
+    }
+}
