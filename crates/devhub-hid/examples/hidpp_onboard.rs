@@ -11,6 +11,7 @@
 //! hidpp_onboard restore <枠 1-5>          # ROM の既定値で上書き (枠 2 は ROM 2、他は ROM 1)
 //! hidpp_onboard mode <1|2>                # 1 = オンボード、2 = ホスト
 //! hidpp_onboard profile <枠 1-5>          # 使う枠を切り替える (オンボードモード中)
+//! hidpp_onboard dpi                       # 今の DPI (0x2201) と DPI 段番号 (0x8100 fn11) を読む
 //! hidpp_onboard dump <sector 16進>        # 1 セクタを読む
 //! hidpp_onboard write <sector 16進> <16進...> [--no-crc]  # 先頭から書き、残り 0xFF、末尾 CRC
 //! ```
@@ -298,6 +299,28 @@ fn run_cmd(dev: &Dev, fi: u8, sector_size: usize, buttons: usize, cmd: &str, a: 
             match dev.rq(fi, 3, &[0x00, slot as u8]) {
                 Ok(_) => println!("setCurrentProfile {slot} OK"),
                 Err(e) => die(&format!("setCurrentProfile 失敗: {e}")),
+            }
+            if let Ok(r) = dev.rq(fi, 4, &[]) {
+                println!("getCurrentProfile: {}", hex(&r[..4]));
+            }
+        }
+        "dpi" => {
+            if let Some(di) = dev.fidx(feat::ADJUSTABLE_DPI) {
+                match dev.rq(di, 2, &[0]) {
+                    Ok(r) => println!(
+                        "getSensorDpi: {} ({})",
+                        u16::from_be_bytes([r[1], r[2]]),
+                        hex(&r[..6])
+                    ),
+                    Err(e) => println!("getSensorDpi: ERR {e}"),
+                }
+            }
+            match dev.rq(fi, 11, &[]) {
+                Ok(r) => println!("getCurrentDpiIndex (fn11): {}", hex(&r[..4])),
+                Err(e) => println!("getCurrentDpiIndex (fn11): ERR {e}"),
+            }
+            if let Ok(r) = dev.rq(fi, 2, &[]) {
+                println!("getMode: {}", r[0]);
             }
             if let Ok(r) = dev.rq(fi, 4, &[]) {
                 println!("getCurrentProfile: {}", hex(&r[..4]));
