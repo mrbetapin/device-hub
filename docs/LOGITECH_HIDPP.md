@@ -71,6 +71,9 @@ feature の index は機種ごとに違うので、毎回 `Root.GetFeature(featu
 | 0x2201 | AdjustableDpi | fn1 DpiList, fn2 GetDpi, fn3 SetDpi `[sensor, dpi BE]` | DPI。リストの `0xE000|step` は範囲の刻み (PRO Wireless は 100–25600 / 50 の想定) |
 | 0x8060 | AdjustableReportRate | fn0 list (bit n = n+1 ms), fn1 get, fn2 set(ms) | ポーリング 125/250/500/1000 Hz。**ホストモードでのみ変更可** |
 | 0x8070 | ColorLedEffects | fn0 info, fn1 ZoneInfo, fn2 ZoneEffectInfo, fn3 SetZoneEffect | ロゴ LED。効果 0x00 消灯 / 0x01 固定 / 0x02 パルス / 0x03 サイクル / 0x0A ブリージング |
+| 0x8071 | RgbEffects | fn0 getInfo, fn1 SetRgbClusterEffect, fn5 SW 制御 | キーボード (G915 X LS TKL で実機確認)。下記 |
+| 0x8040 | BrightnessControl | fn0 info `[max BE16, steps, flags]`, fn1 get, fn2 set(BE16) | 照明全体の明るさ (G915 X: max 100) |
+| 0x8081 | PerKeyLightingV2 | fn0 getInfo(0, page), fn1 個別, fn6 単色一括, fn7 frameEnd | キー単位の色 (解析ツールのみ、ドライバ未実装) |
 | 0x8100 | OnboardProfiles | fn1 SetMode (1=オンボード, 2=ホスト), fn2 GetMode | モード切替 |
 
 `SetZoneEffect` は `[zone, effectIdx, params × 10, persist]`。params の並び:
@@ -82,6 +85,30 @@ feature の index は機種ごとに違うので、毎回 `Root.GetFeature(featu
 | サイクル 0x03 | 0 0 0 0 0 period(BE16) intensity |
 | ブリージング 0x0A | R G B period(BE16) waveform intensity |
 
+### RgbEffects (0x8071) — G915 X LS TKL での実測
+
+- `getInfo(cluster, effect, 0)`。`0xFF` は「全体/クラスタ自身」。
+  - 全体 `[FF, 00, クラスタ数, …]`、クラスタ `[c, 00, location BE16, エフェクト数]`
+    (location 1 = 本体、2 = ロゴ)、エフェクト `[c, e, ID BE16, caps BE16, period BE16]`。
+- **SW 制御 (fn5)**: `[01, 01]` で ON、`[01, 00]` で OFF。get (引数なし) は `[00, 状態, …]`
+  (OFF 時 `00 00 06`、ON 時 `00 01 00`)。**OFF の間は fn1 が NotAllowed (0x05) で拒否される**。
+  ドライバは「本体の照明設定を使う」OFF = SW 制御 ON として、マウスのホストモードと同じ扱いにする。
+- `SetRgbClusterEffect` (fn1) は 0x8070 の SetZoneEffect と同じ `[cluster, effectIdx, params × 10, persist]`。
+- 現在のエフェクトの読み出し関数は未確認 (fn14 は 0x07 InvalidFunction)。表示は保存値から。
+
+| 効果 | params | 確認 |
+|---|---|---|
+| 消灯 0x00 | — | ○ |
+| 固定 0x01 | R G B | ○ |
+| ブリージング 0x0A | R G B period(BE16) waveform intensity | ○ (指定周期どおり) |
+| サイクル 0x15 | 0 saturation 0 0 0 0 period(BE16) intensity | ○ |
+| 0x16 | 不明 (全 0 で白点灯) | UI 非表示 |
+| 0x17 | 全 0 でキー入力に波紋 | ○ |
+
+PerKeyLightingV2 (0x8081): getInfo(0, page) は `[0, page, ビットマップ 14B]` (page × 112 + bit)。
+G915 X は 118 ゾーン、210 はロゴ。fn6 `[R G B, zone × 13]`・fn1 `[zone R G B] × 4` の後に
+fn7 frameEnd `[00]` で反映。キー入力リアクティブ系のエフェクトが残っていると上書きされる。
+
 ## 5. 実機での確認手順 (プロトコル解析)
 
 ```sh
@@ -90,6 +117,8 @@ cargo run -p devhub-hid --example hidpp_probe
 
 # 2) 生レポートを見る (ボタン・電源投入・スリープ復帰の通知の形を観察)
 cargo run -p devhub-hid --example hidpp_probe -- --sniff
+# 3) キーボード照明の書き込み実験 (0x8071 / 0x8040 / 0x8081)。コマンドは hidpp_rgb.rs 冒頭
+cargo run -p devhub-hid --example hidpp_rgb -- info
 ```
 
 確認すること:

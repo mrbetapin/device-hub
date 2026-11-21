@@ -311,6 +311,10 @@ pub mod led {
     pub const PULSE: u16 = 0x02;
     pub const CYCLE: u16 = 0x03;
     pub const BREATHE: u16 = 0x0A;
+    /// RgbEffects (0x8071) のカラーサイクル (彩度つき)。G915 X で確認。
+    pub const CYCLE_S: u16 = 0x15;
+    /// RgbEffects (0x8071) のキー入力で波紋が出るエフェクト。G915 X で確認 (パラメータ 0 で動作)。
+    pub const RIPPLE_KEY: u16 = 0x17;
 }
 
 /// UI の速度 0..=10 → 周期 ms (10 が最速 1 秒、0 が 20 秒)。
@@ -350,6 +354,11 @@ pub fn led_params(effect_id: u16, st: &LightingState) -> [u8; 10] {
             p[5] = 0; // 波形 (0 = 既定)
             p[6] = intensity;
         }
+        led::CYCLE_S => {
+            p[1] = 0xFF; // 彩度
+            p[6..8].copy_from_slice(&period);
+            p[8] = intensity;
+        }
         _ => {}
     }
     p
@@ -362,6 +371,8 @@ fn led_effect_label(id: u16) -> Option<LightEffect> {
         led::PULSE => LightEffect::new(0, "パルス").color(),
         led::CYCLE => LightEffect::new(0, "カラーサイクル"),
         led::BREATHE => LightEffect::new(0, "ブリージング").color(),
+        led::CYCLE_S => LightEffect::new(0, "カラーサイクル"),
+        led::RIPPLE_KEY => LightEffect::new(0, "キー入力で波紋").still(),
         _ => return None,
     })
 }
@@ -386,6 +397,9 @@ pub struct Saved {
     /// 本体の DPI ボタンでステージを順送り (ソフトウェア処理)。
     #[serde(default)]
     pub dpi_button_cycle: bool,
+    /// 照明全体の明るさ (BrightnessControl 0x8040)。
+    #[serde(default)]
+    pub brightness: Option<u16>,
 }
 
 fn data_dir() -> PathBuf {
@@ -431,11 +445,20 @@ struct Features {
     name: Option<String>,
     fw: Option<String>,
     kind: Option<DeviceKind>,
+    /// zones が RgbEffects (0x8071) 由来 (false = ColorLedEffects 0x8070)。
+    rgb: bool,
+    /// BrightnessControl (0x8040) の最大値。
+    bright_max: Option<u16>,
 }
 
 impl Features {
     fn has(&self, id: u16) -> bool {
         self.idx.contains_key(&id)
+    }
+    /// 「本体に任せる / アプリが管理する」を切り替えられる。
+    /// マウスは OnboardProfiles のオンボード/ホストモード、キーボードは RgbEffects の SW 制御。
+    fn has_device_mode(&self) -> bool {
+        self.has(feat::ONBOARD_PROFILES) || self.has(feat::RGB_EFFECTS)
     }
     fn battery(&self) -> bool {
         self.has(feat::BATTERY_VOLTAGE)
@@ -620,6 +643,8 @@ impl Inner {
             feat::ADJUSTABLE_DPI,
             feat::REPORT_RATE,
             feat::COLOR_LED_EFFECTS,
+            feat::RGB_EFFECTS,
+            feat::BRIGHTNESS_CONTROL,
             feat::ONBOARD_PROFILES,
         ] {
             if let Ok(i) = self.get_feature_index(dev, id) {
@@ -703,6 +728,34 @@ impl Inner {
                     effects,
                 });
             }
+        }
+        // RgbEffects (0x8071): getInfo(cluster, effect, 0)。0xFF = 全体/クラスタ自身。
+        // 全体 [_, _, クラスタ数]、クラスタ [c, _, location(2), エフェクト数]、
+        // エフェクト [c, e, ID(2), caps(2), period(2)]。
+        if f.zones.is_empty() {
+            if let Ok(p) = call(feat::RGB_EFFECTS, 0, &[0xFF, 0xFF, 0x00]) {
+                for c in 0..p[2].min(8) {
+                    let Ok(ci) = call(feat::RGB_EFFECTS, 0, &[c, 0xFF, 0x00]) else {
+                        continue;
+                    };
+                    let mut effects = vec![];
+                    for e in 0..ci[4].min(16) {
+                        if let Ok(ei) = call(feat::RGB_EFFECTS, 0, &[c, e, 0x00]) {
+                            effects.push((e, u16::from_be_bytes([ei[2], ei[3]])));
+                        }
+                    }
+                    f.zones.push(Zone {
+                        index: c,
+                        location: u16::from_be_bytes([ci[2], ci[3]]),
+                        effects,
+                    });
+                }
+                f.rgb = !f.zones.is_empty();
+            }
+        }
+        // 明るさの最大値 (getInfo [max(2), steps, flags])。
+        if let Ok(p) = call(feat::BRIGHTNESS_CONTROL, 0, &[]) {
+            f.bright_max = Some(u16::from_be_bytes([p[0], p[1]]).max(1));
         }
         // DPI ボタン (一時ダイバート可能なもの)。
         if let Ok(p) = call(feat::REPROG_CONTROLS_V4, 0, &[]) {
@@ -801,6 +854,51 @@ impl Inner {
         self.call(feat::ONBOARD_PROFILES, 1, &[mode]).map(|_| ())
     }
 
+    /// RgbEffects の SW 制御が ON (アプリが照明を管理) か。fn5 get → [_, 0/1, …]。
+    fn sw_control(&self) -> HubResult<bool> {
+        Ok(self.call(feat::RGB_EFFECTS, 5, &[])?[1] != 0)
+    }
+
+    /// fn5 [01, on]。OFF の間は本体が照明を管理し、エフェクト設定は NotAllowed で拒否される。
+    fn set_sw_control(&self, on: bool) -> HubResult<()> {
+        self.call(feat::RGB_EFFECTS, 5, &[0x01, on as u8])
+            .map(|_| ())
+    }
+
+    /// 本体に任せているなら Some(true)、アプリ管理なら Some(false)、切替機能なしは None。
+    fn device_mode(&self) -> Option<bool> {
+        let f = lock(&self.feats).clone().unwrap_or_default();
+        if f.has(feat::ONBOARD_PROFILES) {
+            return self.onboard_mode().ok().map(|m| m == 1);
+        }
+        if f.has(feat::RGB_EFFECTS) {
+            return self.sw_control().ok().map(|on| !on);
+        }
+        None
+    }
+
+    fn set_device_mode(&self, device: bool) -> HubResult<()> {
+        let f = lock(&self.feats).clone().unwrap_or_default();
+        if f.has(feat::ONBOARD_PROFILES) {
+            self.set_onboard_mode(if device { 1 } else { 2 })?;
+        }
+        if f.has(feat::RGB_EFFECTS) {
+            self.set_sw_control(!device)?;
+        }
+        Ok(())
+    }
+
+    fn current_brightness(&self) -> HubResult<u16> {
+        let p = self.call(feat::BRIGHTNESS_CONTROL, 1, &[])?;
+        Ok(u16::from_be_bytes([p[0], p[1]]))
+    }
+
+    fn set_brightness(&self, v: u16) -> HubResult<()> {
+        let b = v.to_be_bytes();
+        self.call(feat::BRIGHTNESS_CONTROL, 2, &[b[0], b[1]])
+            .map(|_| ())
+    }
+
     fn current_dpi(&self) -> HubResult<u32> {
         let p = self.call(feat::ADJUSTABLE_DPI, 2, &[0])?;
         Ok(u16::from_be_bytes([p[1], p[2]]) as u32)
@@ -833,10 +931,16 @@ impl Inner {
             .and_then(|f| f.zones.iter().find(|z| z.index == zone).cloned())
             .and_then(|z| z.effects.iter().find(|(i, _)| *i == st.effect).map(|e| e.1))
             .ok_or_else(|| HubError::Invalid("LED エフェクト".into()))?;
+        let rgb = lock(&self.feats).as_ref().is_some_and(|f| f.rgb);
         let mut params = vec![zone, st.effect];
         params.extend_from_slice(&led_params(effect_id, st));
         params.push(0x01); // 不揮発に保存
-        self.call(feat::COLOR_LED_EFFECTS, 3, &params).map(|_| ())
+        if rgb {
+            // RgbEffects.setRgbClusterEffect (fn1)。SW 制御 ON が前提。
+            self.call(feat::RGB_EFFECTS, 1, &params).map(|_| ())
+        } else {
+            self.call(feat::COLOR_LED_EFFECTS, 3, &params).map(|_| ())
+        }
     }
 
     fn set_divert(&self, on: bool) -> HubResult<()> {
@@ -879,9 +983,9 @@ impl Inner {
 
     /// 初めて設定を変えるとき: ホストモードへ切り替え、今の値を保存の初期値にする。
     fn ensure_host(&self) -> HubResult<Saved> {
-        let has_onboard = lock(&self.feats)
+        let has_mode = lock(&self.feats)
             .as_ref()
-            .is_some_and(|f| f.has(feat::ONBOARD_PROFILES));
+            .is_some_and(|f| f.has_device_mode());
         let mut s = lock(&self.saved).clone().unwrap_or_default();
         let fresh = lock(&self.saved).is_none();
         if fresh {
@@ -891,11 +995,12 @@ impl Inner {
                 s.active = 0;
             }
             s.rate_hz = self.current_rate_hz().ok();
+            s.brightness = self.current_brightness().ok();
         }
         let was_host = s.host_mode;
         s.host_mode = true;
-        if has_onboard && (!was_host || self.onboard_mode().ok() != Some(2)) {
-            self.set_onboard_mode(2)?;
+        if has_mode && (!was_host || self.device_mode() != Some(false)) {
+            self.set_device_mode(false)?;
             // 切替で既定値に戻るので、控えた値を入れ直す。
             self.reapply(&s);
         }
@@ -906,13 +1011,16 @@ impl Inner {
     fn reapply(&self, s: &Saved) {
         let f = lock(&self.feats).clone().unwrap_or_default();
         if !s.host_mode {
-            if f.has(feat::ONBOARD_PROFILES) {
-                log_err("onboard", self.set_onboard_mode(1));
+            if f.has_device_mode() {
+                log_err("onboard", self.set_device_mode(true));
             }
             return;
         }
-        if f.has(feat::ONBOARD_PROFILES) && self.onboard_mode().ok() != Some(2) {
-            log_err("host mode", self.set_onboard_mode(2));
+        if f.has_device_mode() && self.device_mode() != Some(false) {
+            log_err("host mode", self.set_device_mode(false));
+        }
+        if let (Some(b), Some(max)) = (s.brightness, f.bright_max) {
+            log_err("brightness", self.set_brightness(b.min(max)));
         }
         if let Some(hz) = s.rate_hz {
             if f.has(feat::REPORT_RATE) {
@@ -1001,11 +1109,12 @@ fn spawn_monitor(inner: Arc<Inner>) {
                 let saved = lock(&inner.saved).clone();
                 if let Some(s) = saved {
                     // 電源を入れ直すとオンボードモードへ戻る — それも再接続とみなす。
+                    // (キーボードは SW 制御が切れる — 同様に扱う)
                     let reverted = s.host_mode
                         && lock(&inner.feats)
                             .as_ref()
-                            .is_some_and(|f| f.has(feat::ONBOARD_PROFILES))
-                        && inner.onboard_mode().ok() == Some(1);
+                            .is_some_and(|f| f.has_device_mode())
+                        && inner.device_mode() == Some(true);
                     let wake = !was || first;
                     if wake || reverted || inner.need_reapply.swap(false, Ordering::Relaxed) {
                         inner.reapply(&s);
@@ -1358,6 +1467,22 @@ impl DeviceDriver for LogiDriver {
                 SettingSpec::toggle("onboard_mode", SYSTEM, "オンボードメモリモード")
                     .help("ON: 本体に保存されたプロファイルで動作 (G HUB で保存した設定)。OFF: このアプリが設定を管理し、常駐エージェントが再接続時に再適用"),
             );
+        } else if f.has(feat::RGB_EFFECTS) {
+            c.settings.push(
+                SettingSpec::toggle("onboard_mode", SYSTEM, "本体の照明設定を使う")
+                    .help("ON: キーボード本体に保存された照明で動作。OFF: このアプリが照明を管理し、常駐エージェントが再接続時に再適用"),
+            );
+        }
+        if let Some(max) = f.bright_max {
+            c.settings.push(SettingSpec::slider(
+                "brightness",
+                LIGHTING,
+                "照明の明るさ",
+                0.,
+                max as f32,
+                1.,
+                "",
+            ));
         }
         if crate::autostart::supported() {
             c.settings.push(
@@ -1367,7 +1492,7 @@ impl DeviceDriver for LogiDriver {
         }
         c.actions.push(
             ActionSpec::new("reapply", SYSTEM, "設定を今すぐ再適用")
-                .help("保存されている DPI・ポーリング・LED をマウスへ書き込み直します"),
+                .help("保存されている DPI・ポーリング・照明を本体へ書き込み直します"),
         );
         c.actions.push(
             ActionSpec::new("import_ghub", SYSTEM, "G HUB の設定を取り込む")
@@ -1416,13 +1541,18 @@ impl DeviceDriver for LogiDriver {
         let saved = lock(&inner.saved).clone();
         let mut settings = BTreeMap::new();
 
-        let onboard = if f.has(feat::ONBOARD_PROFILES) {
-            inner.onboard_mode().ok().map(|m| m == 1)
+        let onboard = if f.has_device_mode() {
+            inner.device_mode()
         } else {
             None
         };
         if let Some(on) = onboard {
             settings.insert("onboard_mode".into(), SettingValue::Bool(on));
+        }
+        if f.bright_max.is_some() {
+            if let Ok(b) = inner.current_brightness() {
+                settings.insert("brightness".into(), SettingValue::Num(b as f32));
+            }
         }
         if f.has(feat::REPORT_RATE) {
             if let Ok(hz) = inner.current_rate_hz() {
@@ -1501,7 +1631,7 @@ impl DeviceDriver for LogiDriver {
                 "onboard_mode" => {
                     let mut s = lock(&inner.saved).clone().unwrap_or_default();
                     if value.as_bool() {
-                        inner.set_onboard_mode(1)?;
+                        inner.set_device_mode(true)?;
                         s.host_mode = false;
                         inner.store_saved(&s);
                     } else {
@@ -1523,6 +1653,18 @@ impl DeviceDriver for LogiDriver {
                     let on = value.as_bool();
                     inner.set_divert(on)?;
                     s.dpi_button_cycle = on;
+                    inner.store_saved(&s);
+                    Ok(())
+                }
+                "brightness" => {
+                    let mut s = inner.ensure_host()?;
+                    let max = lock(&inner.feats)
+                        .as_ref()
+                        .and_then(|f| f.bright_max)
+                        .unwrap_or(100);
+                    let v = (value.as_num().round().max(0.) as u16).min(max);
+                    inner.set_brightness(v)?;
+                    s.brightness = Some(v);
                     inner.store_saved(&s);
                     Ok(())
                 }
@@ -1880,6 +2022,9 @@ mod tests {
         assert_eq!(&b[..7], &[1, 2, 3, 0x03, 0xE8, 0, 80]);
         let c = led_params(led::CYCLE, &st);
         assert_eq!(&c[5..8], &[0x03, 0xE8, 80]);
+        let cs = led_params(led::CYCLE_S, &st);
+        assert_eq!(cs[1], 0xFF);
+        assert_eq!(&cs[6..9], &[0x03, 0xE8, 80]);
         assert_eq!(led_params(led::OFF, &st), [0u8; 10]);
     }
 
