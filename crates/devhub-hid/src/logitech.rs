@@ -402,6 +402,9 @@ pub struct Saved {
     /// 照明全体の明るさ (BrightnessControl 0x8040)。
     #[serde(default)]
     pub brightness: Option<u16>,
+    /// 本体マクロの名前 (枠 → 名前)。本体の形式に名前の欄が無いのでアプリ側に持つ。
+    #[serde(default)]
+    pub macro_names: BTreeMap<usize, String>,
 }
 
 fn data_dir() -> PathBuf {
@@ -1147,7 +1150,18 @@ impl Inner {
                     if *slot >= info.macro_slots() {
                         return Err(HubError::Invalid("マクロ枠".into()));
                     }
-                    self.ob_write_macro(*slot, def.as_ref())
+                    self.ob_write_macro(*slot, def.as_ref())?;
+                    let name = def.as_ref().map(|d| d.name.trim().to_string());
+                    let mut s = lock(&self.saved).clone().unwrap_or_default();
+                    let before = s.macro_names.get(slot).cloned();
+                    match name.filter(|n| !n.is_empty()) {
+                        Some(n) => s.macro_names.insert(*slot, n),
+                        None => s.macro_names.remove(slot),
+                    };
+                    if s.macro_names.get(slot) != before.as_ref() {
+                        self.store_saved(&s);
+                    }
+                    Ok(())
                 }
                 Change::Profile(p) => {
                     if *p >= info.profiles {
@@ -1796,7 +1810,8 @@ impl DeviceDriver for LogiDriver {
                         max_delay_ms: 60_000,
                         modes: vec![ChoiceOpt::new(0, "1 回実行")],
                         repeat_modes: vec![],
-                        names: false,
+                        // 名前はアプリ側 (Saved::macro_names) に保存する。
+                        names: true,
                         mouse_events: true,
                     }),
                 ),
@@ -1981,9 +1996,16 @@ impl DeviceDriver for LogiDriver {
                 .ob_dpi_index()
                 .unwrap_or_else(|_| ob::default_stage(p))
                 .min(d.len().max(1) - 1);
+            let names = saved
+                .as_ref()
+                .map(|s| s.macro_names.clone())
+                .unwrap_or_default();
             let mut macros = vec![];
             for i in 0..o.macro_slots() {
-                macros.push(inner.ob_macro(i).unwrap_or(None));
+                macros.push(inner.ob_macro(i).unwrap_or(None).map(|mut m| {
+                    m.name = names.get(&i).cloned().unwrap_or_default();
+                    m
+                }));
             }
             Some(MouseState {
                 stages: d
@@ -2506,6 +2528,8 @@ mod tests {
             rate_hz: Some(1000),
             lighting: BTreeMap::new(),
             dpi_button_cycle: true,
+            brightness: Some(50),
+            macro_names: BTreeMap::from([(0, "ブクマ".to_string())]),
         };
         let j = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<Saved>(&j).unwrap(), s);
