@@ -456,6 +456,8 @@ struct Features {
     bright_max: Option<u16>,
     /// 本体プロファイル (0x8100) を直接編集する機種 (マウス)。
     ob: Option<ObInfo>,
+    /// 0x8100 getInfo を読めた (ob の判定が確定した)。
+    ob_checked: bool,
 }
 
 /// OnboardProfiles getInfo の要点。
@@ -810,21 +812,6 @@ impl Inner {
                 f.rgb = !f.zones.is_empty();
             }
         }
-        // 本体プロファイル編集 (DPI を持つマウスで、形式が既知のもの)。
-        // getInfo [memory_model, format, macro_format, 枠数, ROM, ボタン数, セクタ数, セクタ長 BE16, …]
-        if idx.contains_key(&feat::ADJUSTABLE_DPI) {
-            if let Ok(p) = call(feat::ONBOARD_PROFILES, 0, &[]) {
-                let size = u16::from_be_bytes([p[7], p[8]]) as usize;
-                if (1..=3).contains(&p[1]) && size >= 0xD0 && p[3] > 0 && p[6] > 1 {
-                    f.ob = Some(ObInfo {
-                        profiles: p[3],
-                        buttons: p[5].min(16),
-                        sectors: p[6],
-                        sector_size: size,
-                    });
-                }
-            }
-        }
         // 明るさの最大値 (getInfo [max(2), steps, flags])。
         if let Ok(p) = call(feat::BRIGHTNESS_CONTROL, 0, &[]) {
             f.bright_max = Some(u16::from_be_bytes([p[0], p[1]]).max(1));
@@ -862,7 +849,47 @@ impl Inner {
             info.asleep = false;
         }
         *lock(&self.feats) = Some(f);
+        self.refresh_ob();
         Ok(())
+    }
+
+    /// 本体プロファイル編集機かを調べて Features に入れる (DPI を持つマウスで、形式が既知のもの)。
+    /// getInfo [memory_model, format, macro_format, 枠数, ROM, ボタン数, セクタ数, セクタ長 BE16, …]。
+    /// 他プロセス (常駐エージェント) の要求と重なって一時的に失敗することがあるので数回試す。
+    /// 取れなければ None のまま (caps() で再試行する)。
+    fn refresh_ob(&self) {
+        let eligible = lock(&self.feats).as_ref().is_some_and(|f| {
+            !f.ob_checked && f.has(feat::ONBOARD_PROFILES) && f.has(feat::ADJUSTABLE_DPI)
+        });
+        if !eligible {
+            return;
+        }
+        for attempt in 0..4 {
+            match self.call(feat::ONBOARD_PROFILES, 0, &[]) {
+                Ok(p) => {
+                    let size = u16::from_be_bytes([p[7], p[8]]) as usize;
+                    let ob = ((1..=3).contains(&p[1]) && size >= 0xD0 && p[3] > 0 && p[6] > 1)
+                        .then_some(ObInfo {
+                            profiles: p[3],
+                            buttons: p[5].min(16),
+                            sectors: p[6],
+                            sector_size: size,
+                        });
+                    trace(&format!("onboard getInfo {:?} -> {ob:?}", &p[..11]));
+                    if let Some(f) = lock(&self.feats).as_mut() {
+                        f.ob = ob;
+                        f.ob_checked = true;
+                    }
+                    self.drop_host_mode_if_ob();
+                    return;
+                }
+                Err(e) => {
+                    trace(&format!("onboard getInfo 失敗 ({attempt}): {e}"));
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+            }
+        }
+        crate::agent_log("本体プロファイルの情報を取得できませんでした (後で再試行します)");
     }
 
     fn saved_path(&self) -> PathBuf {
@@ -886,6 +913,27 @@ impl Inner {
             .and_then(|b| serde_json::from_slice::<Saved>(&b).ok());
         *lock(&self.saved) = s;
         *lock(&self.saved_mtime) = mtime;
+        self.drop_host_mode_if_ob();
+    }
+
+    /// 本体プロファイル編集機は常にオンボード — 以前ホストモードで使っていた保存値の
+    /// フラグを下ろす (残っていると「オンボードに戻った = 電源断」と誤認して切り替え合う)。
+    fn drop_host_mode_if_ob(&self) {
+        if self.ob().is_none() {
+            return;
+        }
+        let s = lock(&self.saved).clone();
+        if let Some(mut s) = s.filter(|s| s.host_mode) {
+            s.host_mode = false;
+            self.store_saved(&s);
+        }
+    }
+
+    /// 本体プロファイル編集機の候補なのに、まだ getInfo が取れていない (判定が不確か)。
+    fn ob_uncertain(&self) -> bool {
+        lock(&self.feats).as_ref().is_some_and(|f| {
+            !f.ob_checked && f.has(feat::ONBOARD_PROFILES) && f.has(feat::ADJUSTABLE_DPI)
+        })
     }
 
     fn store_saved(&self, s: &Saved) {
@@ -1314,6 +1362,12 @@ impl Inner {
     /// 保存値をすべて書き込む。個々の失敗は続行 (ログだけ)。
     fn reapply(&self, s: &Saved) {
         trace(&format!("reapply host={} lighting={:?}", s.host_mode, s.lighting.keys()));
+        self.refresh_ob();
+        if self.ob_uncertain() {
+            // 本体編集機かどうか分からないうちはモードを触らない (次の周期で再試行)。
+            trace("reapply: 本体プロファイルの判定待ち");
+            return;
+        }
         let f = lock(&self.feats).clone().unwrap_or_default();
         if f.ob.is_some() {
             // 設定は本体プロファイルにある — オンボードモードを保つだけ。
@@ -1421,6 +1475,7 @@ fn spawn_monitor(inner: Arc<Inner>) {
                     // 電源を入れ直すとオンボードモードへ戻る — それも再接続とみなす。
                     // (キーボードは SW 制御が切れる — 同様に扱う)
                     let reverted = s.host_mode
+                        && !inner.ob_uncertain()
                         && lock(&inner.feats)
                             .as_ref()
                             .is_some_and(|f| f.has_device_mode() && f.ob.is_none())
@@ -1787,6 +1842,8 @@ impl DeviceDriver for LogiDriver {
 
     fn caps(&self) -> Capabilities {
         use devhub_core::model::section::*;
+        // 発見時に本体プロファイルの情報が取れなかった機種はここで取り直す。
+        self.inner.refresh_ob();
         let f = lock(&self.inner.feats).clone().unwrap_or_default();
         let mut c = Capabilities::empty();
         let (lo, hi, step) = f.dpi.unwrap_or((100, 25600, 50));
@@ -2087,6 +2144,12 @@ impl DeviceDriver for LogiDriver {
         if lock(&inner.feats).is_none() {
             inner.discover()?;
             inner.load_saved();
+        }
+        inner.refresh_ob();
+        if inner.ob_uncertain() {
+            return Err(HubError::Protocol(
+                "本体プロファイルの情報を取得できません。少し待ってからもう一度試してください".into(),
+            ));
         }
         if let Some(r) = inner.ob_apply(change) {
             return r;
