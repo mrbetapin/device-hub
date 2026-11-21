@@ -22,6 +22,8 @@ use std::sync::{Arc, Mutex};
 pub mod atk;
 /// 常駐エージェントの自動起動 (HKCU Run)。
 pub mod autostart;
+/// G HUB (settings.db → ghub-migration.json) からの移行。
+pub mod ghub_import;
 #[doc(hidden)]
 pub mod lamzu;
 /// Logitech G (HID++ 2.0)。診断 example (hidpp_probe) からも使うので公開。

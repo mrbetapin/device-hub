@@ -287,6 +287,12 @@ pub fn speed_to_period(speed: u8) -> u16 {
     1000 + (10 - s) * 1900
 }
 
+/// `speed_to_period` の逆 (G HUB の周期 ms → UI の速度 0..=10)。
+pub fn period_to_speed(period_ms: u32) -> u8 {
+    let steps = (period_ms.clamp(1000, 20000) - 1000 + 950) / 1900;
+    10 - steps.min(10) as u8
+}
+
 /// `setZoneEffect` の 10B パラメータ。
 pub fn led_params(effect_id: u16, st: &LightingState) -> [u8; 10] {
     let mut p = [0u8; 10];
@@ -1092,6 +1098,136 @@ fn default_lighting(z: &Zone) -> LightingState {
     }
 }
 
+/// GUI のプリセット (`device-hub/src/presets.rs`) と同じ置き場所:
+/// `%APPDATA%\DeviceHub\presets\<model>\<name>.json` (中身は `DeviceState`)。
+fn write_preset(model: &str, name: &str, st: &DeviceState) -> std::io::Result<()> {
+    let safe_model: String = model
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe_name: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let dir = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("DeviceHub")
+        .join("presets")
+        .join(safe_model);
+    std::fs::create_dir_all(&dir)?;
+    let json = serde_json::to_vec_pretty(st).map_err(std::io::Error::other)?;
+    std::fs::write(dir.join(format!("{}.json", safe_name.trim())), json)
+}
+
+impl LogiDriver {
+    /// G HUB の移行ファイルを取り込む: デスクトップ → 現在の設定 (ホストモードで保存・適用)、
+    /// ゲーム別 → プリセット。
+    fn import_ghub(&self, path: &std::path::Path) -> HubResult<ActionOutcome> {
+        use crate::ghub_import;
+        let inner = &self.inner;
+        if lock(&inner.feats).is_none() {
+            inner.discover()?;
+            inner.load_saved();
+        }
+        let bytes = std::fs::read(path).map_err(|e| HubError::Io(e.to_string()))?;
+        let m = ghub_import::parse(&bytes).map_err(HubError::Invalid)?;
+        let (name, model) = {
+            let i = inner.lock_info();
+            (i.name.clone(), i.model.clone())
+        };
+        let dev = ghub_import::pick_device(&m, &name).map_err(HubError::Invalid)?;
+        let f = lock(&inner.feats).clone().unwrap_or_default();
+        let dpi = f.dpi.unwrap_or((100, 25600, 50));
+        let zones: Vec<ghub_import::ZoneDesc> = f
+            .zones
+            .iter()
+            .map(|z| (z.index, z.location, z.effects.clone()))
+            .collect();
+
+        // デスクトップ (無ければ最初のゲーム) を今の設定に。
+        let base = dev
+            .desktop
+            .clone()
+            .or_else(|| dev.apps.first().map(|a| a.settings.clone()))
+            .ok_or_else(|| HubError::Invalid("移行ファイルに設定がありません".into()))?;
+        let c = ghub_import::convert(&base, dpi, &f.rates_hz, &zones);
+        let mut s = inner.ensure_host()?;
+        s.stages = c.stages.clone();
+        s.active = c.active;
+        if c.rate_hz.is_some() {
+            s.rate_hz = c.rate_hz;
+        }
+        s.lighting.extend(c.lighting.clone());
+        inner.store_saved(&s);
+        inner.reapply(&s);
+
+        // ゲーム別 → プリセット。
+        let mut presets = 0;
+        for app in &dev.apps {
+            let a = ghub_import::convert(&app.settings, dpi, &f.rates_hz, &zones);
+            let mut settings = BTreeMap::new();
+            if f.has(feat::ONBOARD_PROFILES) {
+                settings.insert("onboard_mode".to_string(), SettingValue::Bool(false));
+            }
+            if let Some(hz) = a.rate_hz {
+                settings.insert("polling".to_string(), SettingValue::Choice(hz));
+            }
+            let st = DeviceState {
+                profile: ProfileState::default(),
+                settings,
+                mouse: Some(MouseState {
+                    stages: a
+                        .stages
+                        .iter()
+                        .map(|d| DpiStage {
+                            x: *d,
+                            y: None,
+                            color: Rgb::default(),
+                            enabled: true,
+                        })
+                        .collect(),
+                    active_stage: a.active,
+                    buttons: vec![],
+                    macros: vec![],
+                    adaptive: None,
+                }),
+                keyboard: None,
+                lighting: a.lighting,
+                peq: None,
+            };
+            if write_preset(&model, &format!("G HUB - {}", app.name), &st).is_ok() {
+                presets += 1;
+            }
+        }
+
+        let mut msg = format!(
+            "G HUB の「{}」を取り込みました (DPI {:?}・ゲーム別プリセット {presets} 件)",
+            dev.prefix, c.stages
+        );
+        if !c.skipped.is_empty() {
+            msg.push_str(&format!(" — 再現できない項目: {}", c.skipped.join("、")));
+        }
+        crate::agent_log(&msg);
+        Ok(ActionOutcome {
+            message: Some(msg),
+            reload: true,
+        })
+    }
+}
+
 impl DeviceDriver for LogiDriver {
     fn info(&self) -> DeviceInfo {
         let inner = &self.inner;
@@ -1167,6 +1303,11 @@ impl DeviceDriver for LogiDriver {
         c.actions.push(
             ActionSpec::new("reapply", SYSTEM, "設定を今すぐ再適用")
                 .help("保存されている DPI・ポーリング・LED をマウスへ書き込み直します"),
+        );
+        c.actions.push(
+            ActionSpec::new("import_ghub", SYSTEM, "G HUB の設定を取り込む")
+                .help("scripts/ghub-export.py で G HUB の settings.db から作った ghub-migration.json を選びます。デスクトップのプロファイルを今の設定に、ゲーム別プロファイルをプリセットにします")
+                .file(&["json"]),
         );
         for z in &f.zones {
             let effects: Vec<LightEffect> = z
@@ -1356,8 +1497,13 @@ impl DeviceDriver for LogiDriver {
         }
     }
 
-    fn run_action(&self, id: &str, _file: Option<&std::path::Path>) -> HubResult<ActionOutcome> {
+    fn run_action(&self, id: &str, file: Option<&std::path::Path>) -> HubResult<ActionOutcome> {
         match id {
+            "import_ghub" => {
+                let path =
+                    file.ok_or_else(|| HubError::Invalid("ファイルが選ばれていません".into()))?;
+                self.import_ghub(path)
+            }
             "reapply" => {
                 let s = lock(&self.inner.saved)
                     .clone()
@@ -1532,6 +1678,16 @@ mod tests {
         let c = led_params(led::CYCLE, &st);
         assert_eq!(&c[5..8], &[0x03, 0xE8, 80]);
         assert_eq!(led_params(led::OFF, &st), [0u8; 10]);
+    }
+
+    #[test]
+    fn speed_period_inverse() {
+        for s in 0..=10u8 {
+            assert_eq!(period_to_speed(speed_to_period(s) as u32), s);
+        }
+        assert_eq!(period_to_speed(8000), 6);
+        assert_eq!(period_to_speed(100), 10);
+        assert_eq!(period_to_speed(60000), 0);
     }
 
     #[test]

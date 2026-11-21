@@ -106,9 +106,42 @@ cargo run -p devhub-hid --example hidpp_probe -- --sniff
 応答 (swId ≠ 0) も見える。G HUB で 1 項目だけ変えて差分を見るのが速い (ADD_DEVICE.md §2.3 と同じ考え方)。
 USBPcap + Wireshark なら要求側も取れる。
 
+## 7. G HUB からの移行
+
+G HUB の設定は `%LOCALAPPDATA%\LGHUB\settings.db` (SQLite)。`data` テーブルの 1 行に
+設定全体が JSON で入っている。
+
+```sh
+# G HUB を終了してから settings.db をコピーし、移行用 JSON を作る (DB は読み取り専用で開く)
+python3 scripts/ghub-export.py settings.db -o ghub-migration.json
+```
+
+Device HUB でマウスを選び、「システム」→ **G HUB の設定を取り込む** で `ghub-migration.json` を選ぶ。
+
+- マウスの DeviceName と G HUB のデバイス接頭辞 (`g502wireless`, `g502x-lightspeed` …) を照合して項目を選ぶ。
+- **デスクトップ** のプロファイル → 現在の設定 (ホストモード) として保存・適用 → 常駐エージェントが維持。
+- **ゲーム別** のプロファイル → プリセット `G HUB - <ゲーム名>` (`%APPDATA%\DeviceHub\presets\<model>\`)。
+  フォアグラウンド連動にするには、Device HUB の「プロセス連動」でルールを作る
+  (G HUB の DB はゲームの exe 名を持たないことが多い — `exe` が空なら手で指定)。
+
+### settings.db の JSON で使っている部分
+
+| キー | 中身 |
+|---|---|
+| `profiles.profiles[]` | `applicationId`・`activeForApplication`・`assignments[] {slotId, cardId}` |
+| `applications.applications[]` | `applicationId` → `name` (`APPLICATION_NAME_DESKTOP` = デスクトップ)・`applicationPath` |
+| `cards.cards[]` (attribute `MOUSE_SETTINGS`) | `mouseSettings.dpiTable {levels, activeDpi, defaultDpi, shiftDpi}`・`reportRate.value` |
+| `cards.cards[]` (attribute `FIRMWARE_LIGHTING_SETTINGS`) | `firmwareLightingSettings.effects[] {id: OFF/FIXED/CYCLE/…, zoneType: ZONE_PRIMARY/ZONE_BRANDING/ZONE_ALL, *Params}` |
+
+slotId は `<デバイス接頭辞>_mouse_settings` / `<接頭辞>_lighting_setting_firmware`。
+色は `{hex}` か `{rgba: 0..1}` (欠けた成分は 0)。`intensity` は 0..1 の割合と解釈している (要実機確認)。
+
+再現しない (飛ばして報告する) もの: DPI シフト、6 段目以降の DPI、本体 LED に無い効果
+(G HUB のソフトウェア効果 `SIGNATURE_*` など)、マクロ・ボタン割り当て。
+
 ## 6. 未対応・今後
 
 - ボタン割り当て・マクロ: 本体への保存は OnboardProfiles のプロファイル (セクタ読み書き + CRC) の
   解析が必要。現状はホストモード + ソフトの DPI 順送りのみ。
 - 8K 機種の拡張レポートレート (0x8061)、ExtendedAdjustableDpi (0x2202)。
-- POWERPLAY / 他の LIGHTSPEED 受信機は PID 登録のみ (同じ HID++ 2.0 なので動く想定)。
+- G502 LIGHTSPEED (有線 C08D)・G502 X LIGHTSPEED (有線 C098)・POWERPLAY / 他の LIGHTSPEED 受信機は PID 登録のみ (同じ HID++ 2.0 なので動く想定)。

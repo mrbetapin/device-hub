@@ -322,6 +322,19 @@ pub const KNOWN: &[KnownDevice] = &[
         "Logitech G LIGHTSPEED",
         Transport::Wireless24G,
     ),
+    // G HUB 移行元の手元機 (G502 系)。PID は公開の機種表から — 実機未検証。
+    logi(
+        0xC08D,
+        "logi-g502-lightspeed",
+        "G502 LIGHTSPEED",
+        Transport::Wired,
+    ),
+    logi(
+        0xC098,
+        "logi-g502-x-lightspeed",
+        "G502 X LIGHTSPEED",
+        Transport::Wired,
+    ),
     logi(
         0xC088,
         "logi-pro-wireless",
