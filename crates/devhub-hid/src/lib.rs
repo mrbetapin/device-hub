@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 #[doc(hidden)]
 pub mod atk;
 /// 常駐エージェントの自動起動 (HKCU Run)。
+pub mod autorule;
 pub mod autostart;
 /// G HUB (settings.db → ghub-migration.json) からの移行。
 pub mod ghub_import;

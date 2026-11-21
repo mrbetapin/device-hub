@@ -158,22 +158,9 @@ fn rule_matches(rule: &ProcRule, fg: &str) -> bool {
     !pat.is_empty() && fg.contains(&pat)
 }
 
-/// ルールの適用先に「本体の枠」を直接選ぶための予約名 (設定プロファイル名と同じ欄に入る)。
-/// `◆本体プロファイル 2` = 本体の枠 2 へ切り替える (`Change::Profile(1)`)。
-pub const SLOT_PREFIX: &str = "◆本体プロファイル ";
-
-pub fn slot_name(n: u8) -> String {
-    format!("{SLOT_PREFIX}{n}")
-}
-
-/// 予約名なら枠番号 (1 始まり)。
-pub fn slot_of(name: &str) -> Option<u8> {
-    name.strip_prefix(SLOT_PREFIX)?
-        .trim()
-        .parse()
-        .ok()
-        .filter(|n| *n >= 1)
-}
+/// ルールの適用先に「本体の枠」を直接選ぶための予約名 (`◆本体プロファイル N`)。
+/// 常駐エージェントと同じ定義を使う。
+pub use devhub_hid::autorule::{slot_name, slot_of};
 
 /// ルールの識別キー (index ではなく内容で持つ — 削除/並び替えに強い)。
 fn rule_key(rule: &ProcRule) -> String {

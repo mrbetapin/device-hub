@@ -12,6 +12,9 @@
 //!   devhub-agent --uninstall  自動起動を解除
 //!   devhub-agent --once       1 回だけ列挙・再適用して終了 (動作確認用)
 //!
+//! Device HUB (GUI) が閉じている間は、GUI で作ったプロセス連動ルール (`prefs.json`) も
+//! 1 秒ごとに評価し、開いている Logitech デバイスへ適用する (`devhub_hid::autorule`)。
+//!
 //! ログ: `%TEMP%\devhub_agent.log`
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -68,7 +71,17 @@ fn main() {
 
     let mut open: HashMap<DeviceId, Arc<dyn devhub_core::DeviceDriver>> = HashMap::new();
     let mut warned_ghub = false;
+    let mut rules = devhub_hid::autorule::AutoRules::new();
+    let mut gui = false;
+    let mut tick: u64 = 0;
     loop {
+        // プロセス連動は毎秒、列挙は 2 秒ごと。
+        tick += 1;
+        run_rules(&mut rules, &mut gui, &open);
+        if tick % 2 == 0 {
+            std::thread::sleep(Duration::from_secs(1));
+            continue;
+        }
         devhub_hid::owner::is_owner();
         match hub.scan() {
             Ok(list) => {
@@ -110,7 +123,48 @@ fn main() {
             std::thread::sleep(Duration::from_secs(4));
             return;
         }
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// プロセス連動 (GUI が閉じている間だけ)。
+fn run_rules(
+    rules: &mut devhub_hid::autorule::AutoRules,
+    gui: &mut bool,
+    open: &HashMap<DeviceId, Arc<dyn devhub_core::DeviceDriver>>,
+) {
+    let now_gui = devhub_hid::autorule::gui_running();
+    if now_gui != *gui {
+        *gui = now_gui;
+        rules.reset();
+        agent_log(if now_gui {
+            "Device HUB が起動 — プロセス連動は Device HUB に任せます"
+        } else {
+            "Device HUB が終了 — プロセス連動をエージェントで続けます"
+        });
+    }
+    if now_gui {
+        return;
+    }
+    rules.reload();
+    if !rules.has_rules() {
+        return;
+    }
+    for a in rules.tick(devhub_hid::autorule::foreground_exe()) {
+        let Some(d) = open.get(&DeviceId(a.device.clone())) else {
+            agent_log(&format!("プロセス連動: 「{}」の対象デバイスが未接続", a.label));
+            continue;
+        };
+        let mut failed = 0;
+        for c in &a.changes {
+            if let Err(e) = d.apply(c) {
+                failed += 1;
+                agent_log(&format!("プロセス連動: 「{}」の適用に失敗: {e}", a.label));
+            }
+        }
+        if failed == 0 {
+            agent_log(&format!("プロセス連動: 「{}」を適用", a.label));
+        }
     }
 }
 

@@ -39,7 +39,7 @@ pub fn is_owner() -> bool {
 }
 
 #[cfg(windows)]
-fn open_exclusive(path: &std::path::Path) -> Option<File> {
+pub(crate) fn open_exclusive(path: &std::path::Path) -> Option<File> {
     use std::os::windows::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .write(true)
@@ -51,7 +51,7 @@ fn open_exclusive(path: &std::path::Path) -> Option<File> {
 }
 
 #[cfg(not(windows))]
-fn open_exclusive(path: &std::path::Path) -> Option<File> {
+pub(crate) fn open_exclusive(path: &std::path::Path) -> Option<File> {
     // Windows 以外は単一プロセス運用 (開発用)。
     std::fs::OpenOptions::new()
         .write(true)

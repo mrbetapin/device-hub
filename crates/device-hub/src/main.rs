@@ -22,6 +22,8 @@ use gpui_kit::component::{Theme, ThemeMode, TitleBar};
 use gpui_kit::*;
 
 fn main() {
+    // 起動中は常駐エージェントのプロセス連動を止める (GUI 側の procmon が担当)。
+    devhub_hid::autorule::hold_gui_lock();
     device_hub::rawinput::start(); // 実測ポーリングレート計測 (Raw Input)
     // USB 計測ワーカーの診断ログ — 未設定なら %TEMP% に既定で出す
     // (切断の OS コード採取用。ワーカー遷移のみで容量は微小)。
