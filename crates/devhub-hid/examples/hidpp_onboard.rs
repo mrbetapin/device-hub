@@ -5,9 +5,19 @@
 //! hidpp_onboard            # 情報・ディレクトリ・各プロファイルの要約 (ボタン割り当て)
 //! hidpp_onboard --raw      # 上に加えて各セクタの全バイトを 16 進で出す
 //! hidpp_onboard --name G502
+//!
+//! # ---- 書き込み (実験用) ----
+//! hidpp_onboard set <枠 1-5> <ボタン#> <4B の16進> [--gshift]  # 1 ボタンの割り当てを書き換える
+//! hidpp_onboard restore <枠 1-5>          # ROM の既定値で上書き (枠 2 は ROM 2、他は ROM 1)
+//! hidpp_onboard mode <1|2>                # 1 = オンボード、2 = ホスト
+//! hidpp_onboard profile <枠 1-5>          # 使う枠を切り替える (オンボードモード中)
+//! hidpp_onboard dump <sector 16進>        # 1 セクタを読む
+//! hidpp_onboard write <sector 16進> <16進...> [--no-crc]  # 先頭から書き、残り 0xFF、末尾 CRC
 //! ```
 //!
-//! 呼ぶのは getInfo (fn0) / getMode (fn2) / getCurrentProfile (fn4) / memoryRead (fn5) だけ。
+//! 引数なしの解析は getInfo (fn0) / getMode (fn2) / getCurrentProfile (fn4) / memoryRead (fn5)
+//! だけを呼ぶ。書き込みは memoryAddrWrite (fn6) / memoryWrite (fn7) / memoryWriteEnd (fn8)。
+//! ユーザー枠 (sector 0x0001..) だけを書く想定。壊れても `restore` で ROM の既定値に戻せる。
 //! G HUB・Device HUB・devhub-agent は終了してから使うこと。
 
 use devhub_hid::logitech::{crc_ccitt, feat, raw_request};
@@ -136,24 +146,23 @@ fn binding(b: &[u8]) -> String {
             _ => "HID ?".into(),
         },
         0x90 => {
+            // G502 X の ROM プロファイルと物理ボタンの対応から確定 (libratbag の表とも一致)。
             let name = match b[1] {
                 0x01 => "ホイール左",
                 0x02 => "ホイール右",
-                0x03 => "電池残量表示",
-                0x04 => "DPI 次",
-                0x05 => "DPI 次 (循環)",
-                0x06 => "DPI 前",
-                0x07 => "DPI 前 (循環)",
+                0x03 => "DPI 上げ",
+                0x04 => "DPI 下げ",
+                0x05 => "DPI 循環",
+                0x06 => "DPI 既定へ",
+                0x07 => "DPI シフト (スナイパー)",
                 0x08 => "プロファイル次",
-                0x09 => "プロファイル次 (循環)",
-                0x0A => "プロファイル前",
-                0x0B => "プロファイル前 (循環)",
-                0x0C => "G-Shift",
-                0x0D => "DPI 既定へ",
-                0x0E => "DPI シフト",
+                0x09 => "プロファイル前",
+                0x0A => "プロファイル循環",
+                0x0B => "G-Shift",
+                0x0C => "電池残量表示",
                 _ => "特殊 ?",
             };
-            format!("{name} (推定)")
+            name.into()
         }
         0x00 => format!(
             "マクロ sector={:#06x} offset={:#06x}",
@@ -162,6 +171,164 @@ fn binding(b: &[u8]) -> String {
         ),
         0xFF => "未割り当て/無効".into(),
         _ => "?".into(),
+    }
+}
+
+/// 末尾 2B に CRC を入れる。
+fn with_crc(mut d: Vec<u8>) -> Vec<u8> {
+    let n = d.len();
+    let c = crc_ccitt(&d[..n - 2]).to_be_bytes();
+    d[n - 2] = c[0];
+    d[n - 1] = c[1];
+    d
+}
+
+/// memoryAddrWrite (fn6) [sector BE16, offset BE16, 長さ BE16] → memoryWrite (fn7) 16B ずつ
+/// → memoryWriteEnd (fn8)。
+fn write_sector(dev: &Dev, fi: u8, sector: u16, data: &[u8]) -> Result<(), String> {
+    let s = sector.to_be_bytes();
+    let len = (data.len() as u16).to_be_bytes();
+    dev.rq(fi, 6, &[s[0], s[1], 0, 0, len[0], len[1]])
+        .map_err(|e| format!("memoryAddrWrite: {e}"))?;
+    for (i, chunk) in data.chunks(16).enumerate() {
+        let mut c = [0xFFu8; 16];
+        c[..chunk.len()].copy_from_slice(chunk);
+        dev.rq(fi, 7, &c)
+            .map_err(|e| format!("memoryWrite #{i}: {e}"))?;
+    }
+    dev.rq(fi, 8, &[])
+        .map_err(|e| format!("memoryWriteEnd: {e}"))?;
+    Ok(())
+}
+
+/// 書いて読み直し、一致を確かめる。
+fn write_verify(dev: &Dev, fi: u8, sector: u16, data: &[u8]) {
+    if let Err(e) = write_sector(dev, fi, sector, data) {
+        die(&format!("書き込み失敗 (sector {sector:#06x}): {e}"));
+    }
+    match read_sector(dev, fi, sector, data.len()) {
+        Ok(back) if back == data => println!("sector {sector:#06x} を書き込み、読み直して一致を確認しました"),
+        Ok(back) => {
+            println!("警告: 読み直した内容が一致しません");
+            for (i, (a, b)) in data.chunks(16).zip(back.chunks(16)).enumerate() {
+                if a != b {
+                    println!("  {:04x}: 書いた {}\n        読んだ {}", i * 16, hex(a), hex(b));
+                }
+            }
+        }
+        Err(e) => println!("警告: 読み直せません: {e}"),
+    }
+}
+
+fn parse_hex_u8(s: &str) -> u8 {
+    u8::from_str_radix(s.trim_start_matches("0x"), 16)
+        .unwrap_or_else(|_| die(&format!("16進の 1B ではありません: {s}")))
+}
+
+fn parse_hex_u16(s: &str) -> u16 {
+    u16::from_str_radix(s.trim_start_matches("0x"), 16)
+        .unwrap_or_else(|_| die(&format!("16進ではありません: {s}")))
+}
+
+fn parse_slot(s: &str) -> u16 {
+    match s.parse::<u16>() {
+        Ok(n @ 1..=5) => n,
+        _ => die("枠は 1〜5 で指定してください"),
+    }
+}
+
+/// 書き込み系コマンド。
+fn run_cmd(dev: &Dev, fi: u8, sector_size: usize, buttons: usize, cmd: &str, a: &[String]) {
+    let arg = |i: usize| -> String {
+        a.get(i)
+            .cloned()
+            .unwrap_or_else(|| die("引数が足りません"))
+    };
+    let no_crc = a.iter().any(|x| x == "--no-crc");
+    let gshift = a.iter().any(|x| x == "--gshift");
+    let pos: Vec<String> = a.iter().filter(|x| !x.starts_with("--")).cloned().collect();
+    match cmd {
+        "set" => {
+            let slot = parse_slot(&arg(0));
+            let btn: usize = arg(1).parse().unwrap_or_else(|_| die("ボタン番号は 10 進"));
+            if btn >= buttons.min(16) {
+                die(&format!("ボタン番号は 0〜{}", buttons.min(16) - 1));
+            }
+            if pos.len() < 6 {
+                die("割り当ては 4B (例: 80 02 06 05)");
+            }
+            let bind: Vec<u8> = pos[2..6].iter().map(|x| parse_hex_u8(x)).collect();
+            let mut d = read_sector(dev, fi, slot, sector_size)
+                .unwrap_or_else(|e| die(&format!("読めません: {e}")));
+            let at = if gshift { 0x60 } else { 0x20 } + btn * 4;
+            println!(
+                "枠 {slot} ボタン #{btn}{}: {} ({}) → {} ({})",
+                if gshift { " (G-Shift)" } else { "" },
+                hex(&d[at..at + 4]),
+                binding(&d[at..at + 4]),
+                hex(&bind),
+                binding(&bind)
+            );
+            d[at..at + 4].copy_from_slice(&bind);
+            write_verify(dev, fi, slot, &with_crc(d));
+        }
+        "restore" => {
+            let slot = parse_slot(&arg(0));
+            let rom = if slot == 2 { 0x0102 } else { 0x0101 };
+            let d = read_sector(dev, fi, rom, sector_size)
+                .unwrap_or_else(|e| die(&format!("ROM が読めません: {e}")));
+            println!("ROM {rom:#06x} → 枠 {slot}");
+            write_verify(dev, fi, slot, &with_crc(d));
+        }
+        "mode" => {
+            let m = parse_hex_u8(&arg(0));
+            if !matches!(m, 1 | 2) {
+                die("mode は 1 (オンボード) か 2 (ホスト)");
+            }
+            match dev.rq(fi, 1, &[m]) {
+                Ok(_) => println!("setMode {m} OK"),
+                Err(e) => die(&format!("setMode 失敗: {e}")),
+            }
+            if let Ok(r) = dev.rq(fi, 2, &[]) {
+                println!("getMode: {}", r[0]);
+            }
+        }
+        "profile" => {
+            let slot = parse_slot(&arg(0));
+            match dev.rq(fi, 3, &[0x00, slot as u8]) {
+                Ok(_) => println!("setCurrentProfile {slot} OK"),
+                Err(e) => die(&format!("setCurrentProfile 失敗: {e}")),
+            }
+            if let Ok(r) = dev.rq(fi, 4, &[]) {
+                println!("getCurrentProfile: {}", hex(&r[..4]));
+            }
+        }
+        "dump" => {
+            let sec = parse_hex_u16(&arg(0));
+            let d = read_sector(dev, fi, sec, sector_size)
+                .unwrap_or_else(|e| die(&format!("読めません: {e}")));
+            let (ok, stored, calc) = crc_ok(&d);
+            println!(
+                "sector {sec:#06x} CRC {} (格納 {stored:04x} / 計算 {calc:04x})",
+                if ok { "OK" } else { "NG" }
+            );
+            dump_raw(&d);
+        }
+        "write" => {
+            let sec = parse_hex_u16(&pos.first().cloned().unwrap_or_else(|| die("sector を指定")));
+            if sec == 0 || sec >= 0x0100 {
+                die("書けるのはユーザー領域 (0x0001〜0x00FF) だけにしています");
+            }
+            let bytes: Vec<u8> = pos[1..].iter().map(|x| parse_hex_u8(x)).collect();
+            if bytes.len() > sector_size - 2 {
+                die("長すぎます");
+            }
+            let mut d = vec![0xFFu8; sector_size];
+            d[..bytes.len()].copy_from_slice(&bytes);
+            let d = if no_crc { d } else { with_crc(d) };
+            write_verify(dev, fi, sec, &d);
+        }
+        _ => die(&format!("不明なコマンド: {cmd}")),
     }
 }
 
@@ -230,12 +397,17 @@ fn show_profile(label: &str, d: &[u8], buttons: usize, raw: bool, macros: &mut V
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
     let raw = args.iter().any(|a| a == "--raw");
-    let name_filter = args
-        .iter()
-        .position(|a| a == "--name")
-        .and_then(|i| args.get(i + 1).cloned());
+    let name_filter = args.iter().position(|a| a == "--name").map(|i| {
+        let v = args.get(i + 1).cloned();
+        args.drain(i..(i + 2).min(args.len()));
+        v.unwrap_or_default()
+    });
+    let cmd = args
+        .first()
+        .filter(|a| !a.starts_with("--"))
+        .cloned();
 
     let api = hidapi::HidApi::new().expect("hidapi");
     let dev = find(&api, name_filter.as_deref());
@@ -266,6 +438,10 @@ fn main() {
     }
     if sector_size < 32 {
         die("セクタ長が不正です");
+    }
+    if let Some(cmd) = cmd {
+        run_cmd(&dev, fi, sector_size, buttons, &cmd, &args[1..]);
+        return;
     }
 
     let mut macros = vec![];
