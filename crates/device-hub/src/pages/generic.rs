@@ -336,24 +336,42 @@ impl Shell {
         let (title, confirm, danger) = (a.label.clone(), a.confirm.clone(), a.danger);
         let run = Rc::new(
             move |this: &mut Shell, _: &mut Window, cx: &mut Context<Shell>| {
-                let file = match &a.file {
-                    Some(exts) => {
-                        let exts: Vec<&str> = exts.iter().map(|s| s.as_str()).collect();
-                        let dlg = rfd::FileDialog::new().add_filter("file", &exts);
-                        let picked = if a.save {
-                            dlg.set_file_name("device-hub-config.json").save_file()
-                        } else {
-                            dlg.pick_file()
-                        };
-                        match picked {
-                            Some(f) => Some(f),
-                            None => return,
-                        }
-                    }
-                    None => None,
-                };
-                this.hub.run_action(&id, &a.id, &a.label, file);
-                cx.notify();
+                if a.file.is_none() {
+                    this.hub.run_action(&id, &a.id, &a.label, None);
+                    cx.notify();
+                    return;
+                }
+                // ファイル選択は gpui の非同期ダイアログで開く。クリック処理の中で
+                // rfd の同期ダイアログを開くと、Windows ではダイアログのメッセージループが
+                // gpui のウィンドウ処理に再入して落ちる。
+                let picked: futures::future::LocalBoxFuture<'static, Option<std::path::PathBuf>> =
+                    if a.save {
+                        let dir = std::env::var_os("USERPROFILE")
+                            .map(std::path::PathBuf::from)
+                            .unwrap_or_else(|| std::path::PathBuf::from("."));
+                        let rx = cx.prompt_for_new_path(&dir, Some("device-hub-config.json"));
+                        Box::pin(async move { rx.await.ok().and_then(|r| r.ok()).flatten() })
+                    } else {
+                        let rx = cx.prompt_for_paths(PathPromptOptions {
+                            files: true,
+                            directories: false,
+                            multiple: false,
+                            prompt: None,
+                        });
+                        Box::pin(async move {
+                            rx.await.ok().and_then(|r| r.ok()).flatten().and_then(|mut v| v.pop())
+                        })
+                    };
+                let (id, a) = (id.clone(), a.clone());
+                cx.spawn(async move |this: WeakEntity<Shell>, cx: &mut AsyncApp| {
+                    let file = picked.await;
+                    let Some(file) = file else { return };
+                    let _ = this.update(cx, |this, cx| {
+                        this.hub.run_action(&id, &a.id, &a.label, Some(file));
+                        cx.notify();
+                    });
+                })
+                .detach();
             },
         );
         if let Some(c) = &confirm {
@@ -374,3 +392,4 @@ pub fn visible(sp: &SettingSpec, st: &DeviceState) -> bool {
         }),
     }
 }
+
