@@ -106,6 +106,13 @@ cargo run -p devhub-hid --example hidpp_probe -- --sniff
 応答 (swId ≠ 0) も見える。G HUB で 1 項目だけ変えて差分を見るのが速い (ADD_DEVICE.md §2.3 と同じ考え方)。
 USBPcap + Wireshark なら要求側も取れる。
 
+## 6. 未対応・今後
+
+- ボタン割り当て・マクロ: 本体への保存は OnboardProfiles のプロファイル (セクタ読み書き + CRC) の
+  解析が必要。現状はホストモード + ソフトの DPI 順送りのみ。
+- 8K 機種の拡張レポートレート (0x8061)、ExtendedAdjustableDpi (0x2202)。
+- G502 LIGHTSPEED (有線 C08D)・G502 X LIGHTSPEED (有線 C098)・POWERPLAY / 他の LIGHTSPEED 受信機は PID 登録のみ (同じ HID++ 2.0 なので動く想定)。
+
 ## 7. G HUB からの移行
 
 G HUB の設定は `%LOCALAPPDATA%\LGHUB\settings.db` (SQLite)。`data` テーブルの 1 行に
@@ -138,10 +145,3 @@ slotId は `<デバイス接頭辞>_mouse_settings` / `<接頭辞>_lighting_sett
 
 再現しない (飛ばして報告する) もの: DPI シフト、6 段目以降の DPI、本体 LED に無い効果
 (G HUB のソフトウェア効果 `SIGNATURE_*` など)、マクロ・ボタン割り当て。
-
-## 6. 未対応・今後
-
-- ボタン割り当て・マクロ: 本体への保存は OnboardProfiles のプロファイル (セクタ読み書き + CRC) の
-  解析が必要。現状はホストモード + ソフトの DPI 順送りのみ。
-- 8K 機種の拡張レポートレート (0x8061)、ExtendedAdjustableDpi (0x2202)。
-- G502 LIGHTSPEED (有線 C08D)・G502 X LIGHTSPEED (有線 C098)・POWERPLAY / 他の LIGHTSPEED 受信機は PID 登録のみ (同じ HID++ 2.0 なので動く想定)。
