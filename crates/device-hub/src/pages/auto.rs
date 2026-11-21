@@ -54,15 +54,53 @@ fn dev_list(shell: &Shell) -> Vec<(DeviceId, String)> {
         .into_iter()
         .filter(|d| d.supported)
         .map(|d| {
+            // 別名 > 開いているセッションの実機名 > 前に見た実機名 > 列挙名 (レシーバー名)。
             let name = shell
                 .prefs
                 .nicknames
                 .get(&d.id.0)
                 .cloned()
+                .or_else(|| {
+                    shell
+                        .hub
+                        .session(&d.id)
+                        .filter(|s| s.caps.is_some())
+                        .map(|s| s.info.name.clone())
+                })
+                .or_else(|| shell.prefs.known_names.get(&d.id.0).cloned())
                 .unwrap_or_else(|| d.name.clone());
             (d.id, name)
         })
         .collect()
+}
+
+impl Shell {
+    /// 開いているセッションの実機名と本体プロファイル枠数を覚える (変わったときだけ保存)。
+    fn remember_devices(&mut self) {
+        let mut changed = false;
+        let ids: Vec<DeviceId> = self.hub.devices.iter().map(|d| d.id.clone()).collect();
+        for id in ids {
+            let Some(s) = self.hub.session(&id) else {
+                continue;
+            };
+            let Some(caps) = s.caps.as_ref() else {
+                continue;
+            };
+            let name = s.info.name.clone();
+            let slots = caps.profiles.as_ref().map(|p| p.count).unwrap_or(0);
+            if self.prefs.known_names.get(&id.0) != Some(&name) {
+                self.prefs.known_names.insert(id.0.clone(), name);
+                changed = true;
+            }
+            if self.prefs.known_slots.get(&id.0) != Some(&slots) {
+                self.prefs.known_slots.insert(id.0.clone(), slots);
+                changed = true;
+            }
+        }
+        if changed {
+            self.prefs.save();
+        }
+    }
 }
 
 /// 選択チップの行 (デバイス/プロファイル選択用)。
@@ -225,13 +263,14 @@ impl Shell {
             .filter(|p| p.devices.iter().any(|t| t.device == id.0))
             .map(|p| p.name.clone())
             .collect();
-        // 本体プロファイルを持つデバイスは、その枠も直接選べる。
+        // 本体プロファイルを持つデバイスは、その枠も直接選べる
+        // (未読込なら前に見た枠数 — remember_devices)。
         let slots = self
             .hub
             .session(id)
             .and_then(|s| s.caps.as_ref())
-            .and_then(|c| c.profiles.as_ref())
-            .map(|pc| pc.count)
+            .map(|c| c.profiles.as_ref().map(|pc| pc.count).unwrap_or(0))
+            .or_else(|| self.prefs.known_slots.get(&id.0).copied())
             .filter(|n| *n > 1)
             .unwrap_or(0);
         v.extend((1..=slots).map(procmon::slot_name));
@@ -243,6 +282,7 @@ impl Shell {
 
     pub fn page_auto(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = theme::pal();
+        self.remember_devices();
         let devs = dev_list(self);
         let fg_now = procmon::foreground_app().unwrap_or_else(|| "(不明)".into());
         let running = procmon::running_apps();

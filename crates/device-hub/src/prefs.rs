@@ -50,6 +50,12 @@ pub struct Prefs {
     /// 再接続・ポート変更でアドレスが変わってもこれで再解決する。
     #[serde(default)]
     pub usb_pick: String,
+    /// 自動化ページ用: 最後に見た実機の表示名と本体プロファイル枠数 (DeviceId → …)。
+    /// デバイスが未接続・未読込でもルールの対象/適用先を選べるようにする。
+    #[serde(default)]
+    pub known_names: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub known_slots: std::collections::BTreeMap<String, u8>,
 }
 
 fn default_usb_hub() -> u16 {
@@ -166,6 +172,8 @@ impl Default for Prefs {
             usb_ep: default_usb_ep(),
             usb_report: default_usb_report(),
             usb_pick: String::new(),
+            known_names: Default::default(),
+            known_slots: Default::default(),
         }
     }
 }
