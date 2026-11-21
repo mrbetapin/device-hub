@@ -3,9 +3,11 @@
 Device HUB で Logitech G HUB を使わずに PRO Wireless などを設定し、常駐エージェントで
 設定を維持するためのメモ。実装は `crates/devhub-hid/src/logitech.rs`、常駐は `crates/devhub-agent`。
 
-> **状態: 実機未検証。** プロトコルは HID++ 2.0 の公開資料 (Logitech が公開した feature 仕様、
-> Solaar / libratbag の実装) に基づく。下の「実機での確認手順」で feature 表と動作を確かめ、
-> 結果をこの文書と `registry.rs` の `verified` に反映すること。
+> **状態:** LIGHTSPEED レシーバー C547 経由の **G502 X LIGHTSPEED** (DPI・ポーリング・電池) と
+> **G915 X LS TKL** (RgbEffects 0x8071 の照明・明るさ 0x8040・SW 制御の再適用) は実機確認済み。
+> PRO Wireless・有線接続・他のレシーバー PID、オンボードメモリモード/常駐エージェントの長期動作は未検証。
+> プロトコルは HID++ 2.0 の公開資料 (Solaar / libratbag の実装) と実機の観測に基づく。
+> 新しい機種は下の「実機での確認手順」で確かめ、この文書と `registry.rs` の `verified` に反映すること。
 
 ## 1. 使い方
 

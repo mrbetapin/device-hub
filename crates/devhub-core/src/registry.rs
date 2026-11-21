@@ -310,12 +310,16 @@ pub const KNOWN: &[KnownDevice] = &[
         "Logitech G LIGHTSPEED",
         Transport::Wireless24G,
     ),
-    logi(
-        0xC547,
-        "logi-lightspeed",
-        "Logitech G LIGHTSPEED",
-        Transport::Wireless24G,
-    ),
+    // 実機確認済み: G502 X LIGHTSPEED (DPI・ポーリング) / G915 X LS TKL (0x8071 照明・明るさ)。
+    KnownDevice {
+        verified: true,
+        ..logi(
+            0xC547,
+            "logi-lightspeed",
+            "Logitech G LIGHTSPEED",
+            Transport::Wireless24G,
+        )
+    },
     logi(
         0xC54D,
         "logi-lightspeed",

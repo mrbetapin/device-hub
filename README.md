@@ -40,7 +40,7 @@ with a Liquid Glass design.
 | HTS Plus Pro (wired + 2.4GHz dongle) | All settings incl. Rapid Trigger |
 | SU66 Max (Keebforce/Everglide) | Keymap, per-key perf, lighting, macros, live travel |
 | TP55 USB DAC | Parametric EQ |
-| Logitech PRO Wireless (wired + LIGHTSPEED) | DPI, polling, logo LED, host/onboard mode — **implemented from public HID++ 2.0 docs, not yet verified on hardware** ([docs/LOGITECH_HIDPP.md](docs/LOGITECH_HIDPP.md)) |
+| Logitech G (HID++ 2.0, wired + LIGHTSPEED) | Mice: DPI, polling, logo LED, host/onboard mode. Keyboards: zone effects and brightness (RgbEffects / BrightnessControl). **Verified:** G502 X LIGHTSPEED and G915 X LS TKL via the C547 receiver; PRO Wireless and wired mode not yet verified ([docs/LOGITECH_HIDPP.md](docs/LOGITECH_HIDPP.md)) |
 
 Other models using the same protocols (mouse.fit report-8/EEPROM, xsyd) are
 detected automatically by capability, not by device name.
