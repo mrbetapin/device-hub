@@ -225,6 +225,16 @@ impl Shell {
             .filter(|p| p.devices.iter().any(|t| t.device == id.0))
             .map(|p| p.name.clone())
             .collect();
+        // 本体プロファイルを持つデバイスは、その枠も直接選べる。
+        let slots = self
+            .hub
+            .session(id)
+            .and_then(|s| s.caps.as_ref())
+            .and_then(|c| c.profiles.as_ref())
+            .map(|pc| pc.count)
+            .filter(|n| *n > 1)
+            .unwrap_or(0);
+        v.extend((1..=slots).map(procmon::slot_name));
         if allow_none {
             v.insert(0, "なし".into());
         }
@@ -517,6 +527,7 @@ impl Shell {
                     p.name == rule.on_fg && p.devices.iter().any(|t| t.device == rule.device)
                 })
                 .map(|_| rule.on_fg.clone())
+                .or_else(|| procmon::slot_of(&rule.on_fg).map(|_| rule.on_fg.clone()))
                 .unwrap_or_else(|| format!("{} (未検出)", rule.on_fg));
             let leave_name = if rule.on_leave.is_empty() {
                 "なし".to_string()
@@ -529,6 +540,7 @@ impl Shell {
                             && p.devices.iter().any(|t| t.device == rule.device)
                     })
                     .map(|_| rule.on_leave.clone())
+                    .or_else(|| procmon::slot_of(&rule.on_leave).map(|_| rule.on_leave.clone()))
                     .unwrap_or_else(|| format!("{} (未検出)", rule.on_leave))
             };
             rule_body = rule_body.child(ui::row_first(

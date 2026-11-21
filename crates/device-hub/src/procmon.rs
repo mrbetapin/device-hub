@@ -158,6 +158,23 @@ fn rule_matches(rule: &ProcRule, fg: &str) -> bool {
     !pat.is_empty() && fg.contains(&pat)
 }
 
+/// ルールの適用先に「本体の枠」を直接選ぶための予約名 (設定プロファイル名と同じ欄に入る)。
+/// `◆本体プロファイル 2` = 本体の枠 2 へ切り替える (`Change::Profile(1)`)。
+pub const SLOT_PREFIX: &str = "◆本体プロファイル ";
+
+pub fn slot_name(n: u8) -> String {
+    format!("{SLOT_PREFIX}{n}")
+}
+
+/// 予約名なら枠番号 (1 始まり)。
+pub fn slot_of(name: &str) -> Option<u8> {
+    name.strip_prefix(SLOT_PREFIX)?
+        .trim()
+        .parse()
+        .ok()
+        .filter(|n| *n >= 1)
+}
+
 /// ルールの識別キー (index ではなく内容で持つ — 削除/並び替えに強い)。
 fn rule_key(rule: &ProcRule) -> String {
     format!("{}|{}", rule.process.trim().to_lowercase(), rule.device)
@@ -371,6 +388,17 @@ impl Shell {
     /// プロファイル名で適用 (rule の device でフィルタしてバンドル全体を流す)。
     /// 戻り値は (送れた件数, 保留した件数, 全件数)。見つからなければ None。
     fn apply_profile_named(&mut self, device: &str, name: &str) -> Option<(usize, usize, usize)> {
+        if let Some(n) = slot_of(name) {
+            // 本体の枠の切替 (設定プロファイルを介さない)。
+            let id = DeviceId(device.to_string());
+            if self.hub.session(&id).is_none()
+                && self.hub.devices.iter().any(|d| d.id == id && d.supported)
+            {
+                self.hub.open(&id, false);
+            }
+            let (s, h) = self.apply_changes(&id, vec![Change::Profile(n - 1)]);
+            return Some((s, h, 1));
+        }
         let profile = self
             .prefs
             .profiles
@@ -495,6 +523,13 @@ mod tests {
             on_leave: String::new(),
             enabled: true,
         }
+    }
+
+    #[test]
+    fn slot_names() {
+        assert_eq!(slot_of(&slot_name(2)), Some(2));
+        assert_eq!(slot_of("◆本体プロファイル 0"), None);
+        assert_eq!(slot_of("fps"), None);
     }
 
     #[test]
