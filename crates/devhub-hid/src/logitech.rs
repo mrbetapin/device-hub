@@ -22,6 +22,7 @@
 //! 保存し、**オーナー** (常駐エージェント `devhub-agent`、居なければ GUI) が
 //! 接続・電源投入・スリープ復帰のたびに再適用する (`Monitor`)。
 
+use crate::logitech_onboard as ob;
 use crate::owner;
 use devhub_core::backend::*;
 use devhub_core::model::*;
@@ -450,6 +451,25 @@ struct Features {
     rgb: bool,
     /// BrightnessControl (0x8040) の最大値。
     bright_max: Option<u16>,
+    /// 本体プロファイル (0x8100) を直接編集する機種 (マウス)。
+    ob: Option<ObInfo>,
+}
+
+/// OnboardProfiles getInfo の要点。
+#[derive(Clone, Copy, Debug)]
+struct ObInfo {
+    profiles: u8,
+    buttons: u8,
+    sectors: u8,
+    sector_size: usize,
+}
+
+impl ObInfo {
+    fn macro_slots(&self) -> usize {
+        (self.sectors as usize)
+            .saturating_sub(ob::MACRO_FIRST_SECTOR as usize)
+            .min(ob::MACRO_MAX_SLOTS)
+    }
 }
 
 impl Features {
@@ -487,6 +507,8 @@ struct Inner {
     stop: AtomicBool,
     online: AtomicBool,
     need_reapply: AtomicBool,
+    /// 本体メモリのセクタのキャッシュ (このアプリ以外は書かない前提。再発見で捨てる)。
+    ob_mem: Mutex<BTreeMap<u16, Vec<u8>>>,
 }
 
 pub struct LogiDriver {
@@ -522,6 +544,7 @@ pub fn open(
         stop: AtomicBool::new(false),
         online: AtomicBool::new(false),
         need_reapply: AtomicBool::new(false),
+        ob_mem: Mutex::new(BTreeMap::new()),
     });
     // 開いた時点で起きていれば機能表を取る (寝ていれば監視スレッドが後で取る)。
     if inner.discover().is_ok() {
@@ -660,6 +683,7 @@ impl Inner {
             DEV_WIRED
         };
         self.dev_idx.store(dev, Ordering::Relaxed);
+        lock(&self.ob_mem).clear();
 
         let mut idx: BTreeMap<u16, u8> = BTreeMap::new();
         for id in [
@@ -781,6 +805,21 @@ impl Inner {
                     });
                 }
                 f.rgb = !f.zones.is_empty();
+            }
+        }
+        // 本体プロファイル編集 (DPI を持つマウスで、形式が既知のもの)。
+        // getInfo [memory_model, format, macro_format, 枠数, ROM, ボタン数, セクタ数, セクタ長 BE16, …]
+        if idx.contains_key(&feat::ADJUSTABLE_DPI) {
+            if let Ok(p) = call(feat::ONBOARD_PROFILES, 0, &[]) {
+                let size = u16::from_be_bytes([p[7], p[8]]) as usize;
+                if (1..=3).contains(&p[1]) && size >= 0xD0 && p[3] > 0 && p[6] > 1 {
+                    f.ob = Some(ObInfo {
+                        profiles: p[3],
+                        buttons: p[5].min(16),
+                        sectors: p[6],
+                        sector_size: size,
+                    });
+                }
             }
         }
         // 明るさの最大値 (getInfo [max(2), steps, flags])。
@@ -918,6 +957,226 @@ impl Inner {
         Ok(())
     }
 
+    // ---------------------------------------------------------------- 本体プロファイル編集
+
+    fn ob(&self) -> Option<ObInfo> {
+        lock(&self.feats).as_ref().and_then(|f| f.ob)
+    }
+
+    fn ob_info(&self) -> HubResult<ObInfo> {
+        self.ob().ok_or(HubError::Unsupported("onboard profiles"))
+    }
+
+    /// memoryRead (fn5) → 16B。
+    fn mem_read16(&self, sector: u16, off: usize) -> HubResult<[u8; 16]> {
+        let s = sector.to_be_bytes();
+        let o = (off as u16).to_be_bytes();
+        self.call(feat::ONBOARD_PROFILES, 5, &[s[0], s[1], o[0], o[1]])
+    }
+
+    fn ob_read(&self, sector: u16) -> HubResult<Vec<u8>> {
+        if let Some(d) = lock(&self.ob_mem).get(&sector) {
+            return Ok(d.clone());
+        }
+        let size = self.ob_info()?.sector_size;
+        let mut out = vec![0u8; size];
+        let mut off = 0;
+        while off < size {
+            let at = off.min(size - 16);
+            let r = self.mem_read16(sector, at)?;
+            let n = (size - at).min(16);
+            out[at..at + n].copy_from_slice(&r[..n]);
+            off = at + 16;
+        }
+        lock(&self.ob_mem).insert(sector, out.clone());
+        Ok(out)
+    }
+
+    /// CRC を付けて 1 セクタ書く。内容が同じなら書かない (フラッシュの書き込み回数を抑える)。
+    /// 書いたら true。
+    fn ob_write(&self, sector: u16, mut d: Vec<u8>) -> HubResult<bool> {
+        ob::seal(&mut d);
+        if lock(&self.ob_mem).get(&sector) == Some(&d) {
+            return Ok(false);
+        }
+        trace(&format!("ob_write sector {sector:#06x}"));
+        lock(&self.ob_mem).remove(&sector);
+        let s = sector.to_be_bytes();
+        let len = (d.len() as u16).to_be_bytes();
+        self.call(feat::ONBOARD_PROFILES, 6, &[s[0], s[1], 0, 0, len[0], len[1]])?;
+        for chunk in d.chunks(16) {
+            let mut c = [0xFFu8; 16];
+            c[..chunk.len()].copy_from_slice(chunk);
+            self.call(feat::ONBOARD_PROFILES, 7, &c)?;
+        }
+        self.call(feat::ONBOARD_PROFILES, 8, &[])?;
+        lock(&self.ob_mem).insert(sector, d);
+        Ok(true)
+    }
+
+    /// 使用中の枠 (1..)。ホストモード中は 0 が返るので 1 とみなす。
+    fn ob_slot(&self) -> HubResult<u8> {
+        let p = self.call(feat::ONBOARD_PROFILES, 4, &[])?;
+        Ok(p[1].max(1))
+    }
+
+    fn ob_profile_sector(&self, slot: u8) -> HubResult<u16> {
+        let dir = self.ob_read(0x0000)?;
+        Ok(ob::parse_dir(&dir)
+            .get(slot as usize - 1)
+            .map(|e| e.0)
+            .unwrap_or(slot as u16))
+    }
+
+    /// 使用中の枠の (枠, セクタ, 中身)。
+    fn ob_profile(&self) -> HubResult<(u8, u16, Vec<u8>)> {
+        let slot = self.ob_slot()?;
+        let sec = self.ob_profile_sector(slot)?;
+        Ok((slot, sec, self.ob_read(sec)?))
+    }
+
+    fn ob_ensure_onboard(&self) -> HubResult<()> {
+        if self.onboard_mode().ok() != Some(1) {
+            self.set_onboard_mode(1)?;
+        }
+        Ok(())
+    }
+
+    fn ob_dpi_index(&self) -> HubResult<usize> {
+        Ok(self.call(feat::ONBOARD_PROFILES, 11, &[])?[0] as usize)
+    }
+
+    fn ob_set_dpi_index(&self, i: usize) -> HubResult<()> {
+        self.call(feat::ONBOARD_PROFILES, 12, &[i as u8])
+            .map(|_| ())
+    }
+
+    /// 使用中の枠を書き換えたら、枠を選び直して本体に読み込ませる。
+    /// DPI 段は `dpi` (None なら今の段) に戻す。
+    fn ob_commit_profile(
+        &self,
+        slot: u8,
+        sec: u16,
+        p: Vec<u8>,
+        dpi: Option<usize>,
+    ) -> HubResult<()> {
+        let stages = ob::dpis(&p).len().max(1);
+        let keep = self.ob_dpi_index().unwrap_or(0);
+        if self.ob_write(sec, p)? {
+            self.ob_ensure_onboard()?;
+            self.call(feat::ONBOARD_PROFILES, 3, &[0x00, slot])?;
+        }
+        self.ob_set_dpi_index(dpi.unwrap_or(keep).min(stages - 1))
+    }
+
+    /// 枠を切り替える (無効な枠ならディレクトリで有効にする)。DPI は枠の既定段へ。
+    fn ob_switch_profile(&self, slot: u8) -> HubResult<()> {
+        let mut dir = self.ob_read(0x0000)?;
+        if ob::enable_dir_entry(&mut dir, slot as usize - 1) {
+            self.ob_write(0x0000, dir)?;
+        }
+        self.ob_ensure_onboard()?;
+        self.call(feat::ONBOARD_PROFILES, 3, &[0x00, slot])?;
+        let sec = self.ob_profile_sector(slot)?;
+        let p = self.ob_read(sec)?;
+        self.ob_set_dpi_index(ob::default_stage(&p).min(ob::dpis(&p).len().max(1) - 1))
+    }
+
+    fn ob_macro(&self, slot: usize) -> HubResult<Option<MacroDef>> {
+        let sec = ob::MACRO_FIRST_SECTOR + slot as u16;
+        // 空の枠は先頭 16B で分かる (全部読むと 16 往復)。
+        if !lock(&self.ob_mem).contains_key(&sec) {
+            let head = self.mem_read16(sec, 0)?;
+            if head[0] == 0xFF {
+                let size = self.ob_info()?.sector_size;
+                lock(&self.ob_mem).insert(sec, vec![0xFF; size]);
+                return Ok(None);
+            }
+        }
+        let d = self.ob_read(sec)?;
+        Ok(ob::decode_macro(&d[..d.len() - 2]).map(|events| MacroDef {
+            name: String::new(),
+            events,
+            mode: 0,
+            repeat: 1,
+        }))
+    }
+
+    fn ob_write_macro(&self, slot: usize, def: Option<&MacroDef>) -> HubResult<()> {
+        let info = self.ob_info()?;
+        let mut d = vec![0xFFu8; info.sector_size];
+        if let Some(def) = def {
+            let b = ob::encode_macro(def, info.sector_size - 2).map_err(HubError::Invalid)?;
+            d[..b.len()].copy_from_slice(&b);
+        }
+        self.ob_write(ob::MACRO_FIRST_SECTOR + slot as u16, d)
+            .map(|_| ())
+    }
+
+    /// 本体プロファイル編集機の変更。扱わない変更は None (通常の処理へ)。
+    fn ob_apply(&self, change: &Change) -> Option<HubResult<()>> {
+        let info = self.ob()?;
+        let r = (|| -> HubResult<()> {
+            match change {
+                Change::DpiStages { stages, active } => {
+                    if stages.is_empty() || stages.len() > 5 {
+                        return Err(HubError::Invalid("DPI ステージは 1〜5 個です".into()));
+                    }
+                    let (lo, hi, _) = lock(&self.feats)
+                        .as_ref()
+                        .and_then(|f| f.dpi)
+                        .unwrap_or((100, 25600, 50));
+                    let v: Vec<u32> = stages.iter().map(|s| s.x.clamp(lo, hi)).collect();
+                    let a = (*active).min(v.len() - 1);
+                    let (slot, sec, mut p) = self.ob_profile()?;
+                    ob::set_dpis(&mut p, &v);
+                    ob::set_default_stage(&mut p, a);
+                    self.ob_commit_profile(slot, sec, p, Some(a))
+                }
+                Change::ActiveStage(a) => self.ob_set_dpi_index(*a),
+                Change::Button { slot, action } => {
+                    if *slot >= info.buttons as usize {
+                        return Err(HubError::Invalid("ボタン番号".into()));
+                    }
+                    let (pslot, sec, mut p) = self.ob_profile()?;
+                    let b = ob::encode_binding(action, &mut p).map_err(HubError::Invalid)?;
+                    ob::set_button(&mut p, *slot, b);
+                    self.ob_commit_profile(pslot, sec, p, None)
+                }
+                Change::Macro { slot, def } => {
+                    if *slot >= info.macro_slots() {
+                        return Err(HubError::Invalid("マクロ枠".into()));
+                    }
+                    self.ob_write_macro(*slot, def.as_ref())
+                }
+                Change::Profile(p) => {
+                    if *p >= info.profiles {
+                        return Err(HubError::Invalid("プロファイル番号".into()));
+                    }
+                    self.ob_switch_profile(p + 1)
+                }
+                Change::Setting { id, value } if id == "polling" => {
+                    let (slot, sec, mut p) = self.ob_profile()?;
+                    ob::set_report_hz(&mut p, value.as_choice());
+                    self.ob_commit_profile(slot, sec, p, None)
+                }
+                Change::Lighting { area, state } => {
+                    // ホストモードへは切り替えない (本体プロファイル編集機はオンボードで動かす)。
+                    self.set_led(*area, state)?;
+                    let mut s = lock(&self.saved).clone().unwrap_or_default();
+                    s.lighting.insert(*area, state.clone());
+                    self.store_saved(&s);
+                    Ok(())
+                }
+                _ => Err(HubError::Unsupported("__not_ob__")),
+            }
+        })();
+        match r {
+            Err(HubError::Unsupported("__not_ob__")) => None,
+            r => Some(r),
+        }
+    }
+
     fn current_brightness(&self) -> HubResult<u16> {
         let p = self.call(feat::BRIGHTNESS_CONTROL, 1, &[])?;
         Ok(u16::from_be_bytes([p[0], p[1]]))
@@ -1042,6 +1301,11 @@ impl Inner {
     fn reapply(&self, s: &Saved) {
         trace(&format!("reapply host={} lighting={:?}", s.host_mode, s.lighting.keys()));
         let f = lock(&self.feats).clone().unwrap_or_default();
+        if f.ob.is_some() {
+            // 設定は本体プロファイルにある — オンボードモードを保つだけ。
+            log_err("onboard", self.ob_ensure_onboard());
+            return;
+        }
         if !s.host_mode {
             if f.has_device_mode() {
                 log_err("onboard", self.set_device_mode(true));
@@ -1145,7 +1409,7 @@ fn spawn_monitor(inner: Arc<Inner>) {
                     let reverted = s.host_mode
                         && lock(&inner.feats)
                             .as_ref()
-                            .is_some_and(|f| f.has_device_mode())
+                            .is_some_and(|f| f.has_device_mode() && f.ob.is_none())
                         && inner.device_mode() == Some(true);
                     let wake = !was || first;
                     if wake || reverted || inner.need_reapply.swap(false, Ordering::Relaxed) {
@@ -1259,6 +1523,32 @@ fn spawn_listener(inner: Arc<Inner>) {
 
 // ====================================================================== 契約の実装
 
+/// 本体プロファイルのボタン名。G502 系は実機で確かめた並び、それ以外は番号。
+fn ob_button_names(name: &str, n: usize) -> Vec<ButtonSlot> {
+    const G502: [&str; 11] = [
+        "左ボタン",
+        "右ボタン",
+        "ホイールクリック",
+        "戻る",
+        "スナイパー (G6)",
+        "進む",
+        "ホイール左チルト",
+        "ホイール右チルト",
+        "G9 (ホイール後ろ)",
+        "G8 (DPI 上げ)",
+        "G7 (DPI 下げ)",
+    ];
+    (0..n)
+        .map(|i| ButtonSlot {
+            name: if name.contains("G502") && n == G502.len() {
+                G502[i].to_string()
+            } else {
+                format!("ボタン {}", i + 1)
+            },
+        })
+        .collect()
+}
+
 /// 実機名 → model ID ("G915 X LS TKL" → "logi-g915-x-ls-tkl")。
 /// 有線の registry と同じ形 (G502 X LIGHTSPEED → logi-g502-x-lightspeed)。
 pub fn model_from_name(name: &str) -> Option<String> {
@@ -1370,22 +1660,54 @@ impl LogiDriver {
             .or_else(|| dev.apps.first().map(|a| a.settings.clone()))
             .ok_or_else(|| HubError::Invalid("移行ファイルに設定がありません".into()))?;
         let c = ghub_import::convert(&base, dpi, &f.rates_hz, &zones);
-        let mut s = inner.ensure_host()?;
-        s.stages = c.stages.clone();
-        s.active = c.active;
-        if c.rate_hz.is_some() {
-            s.rate_hz = c.rate_hz;
+        if f.ob.is_some() {
+            // 本体プロファイル (使用中の枠) へ書く。
+            let stages = c
+                .stages
+                .iter()
+                .map(|d| DpiStage {
+                    x: *d,
+                    y: None,
+                    color: Rgb::default(),
+                    enabled: true,
+                })
+                .collect();
+            let none = || HubError::Unsupported("onboard");
+            inner
+                .ob_apply(&Change::DpiStages {
+                    stages,
+                    active: c.active,
+                })
+                .ok_or_else(none)??;
+            if let Some(hz) = c.rate_hz {
+                inner
+                    .ob_apply(&Change::Setting {
+                        id: "polling".into(),
+                        value: SettingValue::Choice(hz),
+                    })
+                    .ok_or_else(none)??;
+            }
+            for (z, st) in &c.lighting {
+                log_err("led", inner.set_led(*z, st));
+            }
+        } else {
+            let mut s = inner.ensure_host()?;
+            s.stages = c.stages.clone();
+            s.active = c.active;
+            if c.rate_hz.is_some() {
+                s.rate_hz = c.rate_hz;
+            }
+            s.lighting.extend(c.lighting.clone());
+            inner.store_saved(&s);
+            inner.reapply(&s);
         }
-        s.lighting.extend(c.lighting.clone());
-        inner.store_saved(&s);
-        inner.reapply(&s);
 
         // ゲーム別 → プリセット。
         let mut presets = 0;
         for app in &dev.apps {
             let a = ghub_import::convert(&app.settings, dpi, &f.rates_hz, &zones);
             let mut settings = BTreeMap::new();
-            if f.has(feat::ONBOARD_PROFILES) {
+            if f.has(feat::ONBOARD_PROFILES) && f.ob.is_none() {
                 settings.insert("onboard_mode".to_string(), SettingValue::Bool(false));
             }
             if let Some(hz) = a.rate_hz {
@@ -1455,6 +1777,31 @@ impl DeviceDriver for LogiDriver {
         let mut c = Capabilities::empty();
         let (lo, hi, step) = f.dpi.unwrap_or((100, 25600, 50));
         if f.has(feat::ADJUSTABLE_DPI) || f.idx.is_empty() {
+            let name = self.inner.lock_info().name.clone();
+            let (buttons, button_kinds, macros) = match f.ob {
+                Some(o) => (
+                    ob_button_names(&name, o.buttons as usize),
+                    vec![
+                        ButtonActionKind::Mouse,
+                        ButtonActionKind::Key,
+                        ButtonActionKind::Macro,
+                        ButtonActionKind::Media,
+                        ButtonActionKind::Dpi,
+                        ButtonActionKind::ProfileCycle,
+                        ButtonActionKind::Disabled,
+                    ],
+                    (o.macro_slots() > 0).then(|| MacroCaps {
+                        slots: o.macro_slots() as u8,
+                        max_events: 40,
+                        max_delay_ms: 60_000,
+                        modes: vec![ChoiceOpt::new(0, "1 回実行")],
+                        repeat_modes: vec![],
+                        names: false,
+                        mouse_events: true,
+                    }),
+                ),
+                None => (vec![], vec![], None),
+            };
             c.mouse = Some(MouseCaps {
                 dpi_min: lo,
                 dpi_max: hi,
@@ -1464,29 +1811,37 @@ impl DeviceDriver for LogiDriver {
                 xy_split: false,
                 stage_colors: false,
                 stage_toggle: false,
-                buttons: vec![],
-                button_kinds: vec![],
-                require_left_click: false,
-                macros: None,
+                buttons,
+                button_kinds,
+                require_left_click: f.ob.is_some(),
+                macros,
                 live_buttons: vec![],
                 adaptive_dpi: None,
             });
         }
-        if f.has(feat::REPORT_RATE) && !f.rates_hz.is_empty() {
-            c.settings.push(
-                SettingSpec::choice(
-                    "polling",
-                    PERFORMANCE,
-                    "ポーリングレート",
-                    f.rates_hz
-                        .iter()
-                        .map(|hz| ChoiceOpt::new(*hz, format!("{hz} Hz")))
-                        .collect(),
-                )
-                .help("変更するとホストモード (このアプリで管理) に切り替わります"),
-            );
+        if let Some(o) = f.ob {
+            c.profiles = Some(ProfileCaps {
+                count: o.profiles,
+                renamable: false,
+            });
         }
-        if f.dpi_cid.is_some() {
+        if f.has(feat::REPORT_RATE) && !f.rates_hz.is_empty() {
+            let spec = SettingSpec::choice(
+                "polling",
+                PERFORMANCE,
+                "ポーリングレート",
+                f.rates_hz
+                    .iter()
+                    .map(|hz| ChoiceOpt::new(*hz, format!("{hz} Hz")))
+                    .collect(),
+            );
+            c.settings.push(if f.ob.is_some() {
+                spec.help("本体のプロファイルに保存されます")
+            } else {
+                spec.help("変更するとホストモード (このアプリで管理) に切り替わります")
+            });
+        }
+        if f.dpi_cid.is_some() && f.ob.is_none() {
             c.settings.push(
                 SettingSpec::toggle("dpi_button_cycle", PERFORMANCE, "DPI ボタンでステージ切替")
                     .help(
@@ -1494,7 +1849,9 @@ impl DeviceDriver for LogiDriver {
                     ),
             );
         }
-        if f.has(feat::ONBOARD_PROFILES) {
+        if f.ob.is_some() {
+            // 本体プロファイルを直接編集する — モード切替は出さない (常にオンボード)。
+        } else if f.has(feat::ONBOARD_PROFILES) {
             c.settings.push(
                 SettingSpec::toggle("onboard_mode", SYSTEM, "オンボードメモリモード")
                     .help("ON: 本体に保存されたプロファイルで動作 (G HUB で保存した設定)。OFF: このアプリが設定を管理し、常駐エージェントが再接続時に再適用"),
@@ -1522,10 +1879,12 @@ impl DeviceDriver for LogiDriver {
                     .help("ウィンドウを閉じてもバックグラウンドで電源投入・スリープ復帰時に設定を再適用します (G HUB の代わり)"),
             );
         }
-        c.actions.push(
+        if f.ob.is_none() {
+            c.actions.push(
             ActionSpec::new("reapply", SYSTEM, "設定を今すぐ再適用")
                 .help("保存されている DPI・ポーリング・照明を本体へ書き込み直します"),
-        );
+            );
+        }
         c.actions.push(
             ActionSpec::new("import_ghub", SYSTEM, "G HUB の設定を取り込む")
                 .help("scripts/ghub-export.py で G HUB の settings.db から作った ghub-migration.json を選びます。デスクトップのプロファイルを今の設定に、ゲーム別プロファイルをプリセットにします")
@@ -1573,7 +1932,15 @@ impl DeviceDriver for LogiDriver {
         let saved = lock(&inner.saved).clone();
         let mut settings = BTreeMap::new();
 
-        let onboard = if f.has_device_mode() {
+        // 本体プロファイル編集機: 常にオンボードで動かし、表示は使用中の枠から作る。
+        let ob_prof = match f.ob {
+            Some(_) => {
+                inner.ob_ensure_onboard()?;
+                Some(inner.ob_profile()?)
+            }
+            None => None,
+        };
+        let onboard = if f.has_device_mode() && f.ob.is_none() {
             inner.device_mode()
         } else {
             None
@@ -1587,7 +1954,11 @@ impl DeviceDriver for LogiDriver {
             }
         }
         if f.has(feat::REPORT_RATE) {
-            if let Ok(hz) = inner.current_rate_hz() {
+            let hz = match &ob_prof {
+                Some((_, _, p)) => ob::report_hz(p).ok_or(HubError::Unsupported("rate")),
+                None => inner.current_rate_hz(),
+            };
+            if let Ok(hz) = hz {
                 settings.insert("polling".into(), SettingValue::Choice(hz));
             }
         }
@@ -1604,7 +1975,36 @@ impl DeviceDriver for LogiDriver {
             );
         }
 
-        let mouse = if f.has(feat::ADJUSTABLE_DPI) {
+        let mouse = if let (Some(o), Some((_, _, p))) = (f.ob, &ob_prof) {
+            let d = ob::dpis(p);
+            let active = inner
+                .ob_dpi_index()
+                .unwrap_or_else(|_| ob::default_stage(p))
+                .min(d.len().max(1) - 1);
+            let mut macros = vec![];
+            for i in 0..o.macro_slots() {
+                macros.push(inner.ob_macro(i).unwrap_or(None));
+            }
+            Some(MouseState {
+                stages: d
+                    .iter()
+                    .map(|x| DpiStage {
+                        x: *x,
+                        y: None,
+                        color: Rgb::default(),
+                        enabled: true,
+                    })
+                    .collect(),
+                active_stage: active,
+                buttons: (0..o.buttons as usize)
+                    .map(|i| {
+                        ob::decode_binding(ob::button(p, i), p).unwrap_or(ButtonAction::Disabled)
+                    })
+                    .collect(),
+                macros,
+                adaptive: None,
+            })
+        } else if f.has(feat::ADJUSTABLE_DPI) {
             let cur = inner.current_dpi().ok();
             let host = saved.as_ref().is_some_and(|s| s.host_mode) && onboard != Some(true);
             let (dpis, active) = match (&saved, host) {
@@ -1642,8 +2042,15 @@ impl DeviceDriver for LogiDriver {
             lighting.insert(z.index, st);
         }
 
+        let profile = match (f.ob, &ob_prof) {
+            (Some(o), Some((slot, _, _))) => ProfileState {
+                active: slot - 1,
+                names: vec![String::new(); o.profiles as usize],
+            },
+            _ => ProfileState::default(),
+        };
         Ok(DeviceState {
-            profile: ProfileState::default(),
+            profile,
             settings,
             mouse,
             keyboard: None,
@@ -1658,6 +2065,9 @@ impl DeviceDriver for LogiDriver {
         if lock(&inner.feats).is_none() {
             inner.discover()?;
             inner.load_saved();
+        }
+        if let Some(r) = inner.ob_apply(change) {
+            return r;
         }
         match change {
             Change::Setting { id, value } => match id.as_str() {

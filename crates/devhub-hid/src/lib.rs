@@ -29,6 +29,7 @@ pub mod lamzu;
 /// Logitech G (HID++ 2.0)。診断 example (hidpp_probe) からも使うので公開。
 #[doc(hidden)]
 pub mod logitech;
+pub mod logitech_onboard;
 #[allow(dead_code)]
 mod mousefit;
 mod mousefit8;
