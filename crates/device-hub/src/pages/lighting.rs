@@ -264,7 +264,7 @@ impl Shell {
                 }
                 body = body.child(ui::row("カラー", None, dots));
             }
-            {
+            if eff.as_ref().is_none_or(|e| e.brightness) {
                 let base = ls.clone();
                 let bmax = area.brightness_max as f32;
                 let f = Rc::new(move |this: &mut Shell, v: f32, cx: &mut Context<Shell>| {

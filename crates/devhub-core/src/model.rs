@@ -948,6 +948,8 @@ pub struct LightEffect {
     pub direction: bool,
     /// キーごとの色 (カスタム) モードか。
     pub per_key: bool,
+    /// エフェクト単位の明るさを持つか (false なら UI は明るさスライダーを出さない)。
+    pub brightness: bool,
 }
 
 impl LightEffect {
@@ -959,10 +961,16 @@ impl LightEffect {
             speed: true,
             direction: false,
             per_key: false,
+            brightness: true,
         }
     }
     pub fn color(mut self) -> Self {
         self.color = true;
+        self
+    }
+    /// 明るさを指定できないエフェクト (全体の明るさにだけ従う)。
+    pub fn no_brightness(mut self) -> Self {
+        self.brightness = false;
         self
     }
     pub fn still(mut self) -> Self {

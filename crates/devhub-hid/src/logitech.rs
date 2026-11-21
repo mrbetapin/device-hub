@@ -366,13 +366,14 @@ pub fn led_params(effect_id: u16, st: &LightingState) -> [u8; 10] {
 
 fn led_effect_label(id: u16) -> Option<LightEffect> {
     Some(match id {
-        led::OFF => LightEffect::new(0, "消灯").still(),
-        led::STATIC => LightEffect::new(0, "固定").color().still(),
+        led::OFF => LightEffect::new(0, "消灯").still().no_brightness(),
+        // 固定色のパラメータは R G B だけ (明るさは全体の 0x8040 のみ)。
+        led::STATIC => LightEffect::new(0, "固定").color().still().no_brightness(),
         led::PULSE => LightEffect::new(0, "パルス").color(),
         led::CYCLE => LightEffect::new(0, "カラーサイクル"),
         led::BREATHE => LightEffect::new(0, "ブリージング").color(),
         led::CYCLE_S => LightEffect::new(0, "カラーサイクル"),
-        led::RIPPLE_KEY => LightEffect::new(0, "キー入力で波紋").still(),
+        led::RIPPLE_KEY => LightEffect::new(0, "キー入力で波紋").still().no_brightness(),
         _ => return None,
     })
 }
