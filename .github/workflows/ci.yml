@@ -36,10 +36,11 @@ jobs:
           path: dist/
       # 実機解析用 (配布物には入れない)。G HUB を終了してから実行する。
       - name: Build HID++ tools
-        run: cargo build --release --locked -p devhub-hid --example hidpp_probe --example hidpp_rgb
+        run: cargo build --release --locked -p devhub-hid --example hidpp_probe --example hidpp_rgb --example hidpp_onboard
       - uses: actions/upload-artifact@v4
         with:
           name: hidpp-probe
           path: |
             target/release/examples/hidpp_probe.exe
             target/release/examples/hidpp_rgb.exe
+            target/release/examples/hidpp_onboard.exe

@@ -1779,6 +1779,22 @@ pub struct ProbeReport {
     pub details: Vec<(String, Result<[u8; 16], String>)>,
 }
 
+/// OnboardProfiles のセクタ末尾 2B (BE) に入る CRC-16/CCITT (init 0xFFFF, poly 0x1021)。
+pub fn crc_ccitt(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0xFFFF;
+    for &b in data {
+        crc ^= (b as u16) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
 /// 解析ツール用の 1 往復 (ドライバを通さず、開いた long コレクションへ直接)。
 /// `func` は関数番号 0..15、`params` は 16B まで。
 pub fn raw_request(
@@ -2088,6 +2104,11 @@ mod tests {
             serde_json::from_str::<Saved>("{}").unwrap(),
             Saved::default()
         );
+    }
+
+    #[test]
+    fn crc_ccitt_false() {
+        assert_eq!(crc_ccitt(b"123456789"), 0x29B1);
     }
 
     #[test]
