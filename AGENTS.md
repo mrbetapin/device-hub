@@ -10,6 +10,7 @@ crates/devhub-core   契約 v2 (model / backend トレイト) + keys + registry 
 crates/devhub-hid    実機ドライバ (HID)                                                       ← バックエンド担当
 crates/devhub-polling USBPcap 実測ポーリング計測器 (Target/Snapshot/Capture)                     ← アプリ・OBS 共通
 crates/device-hub    GPUI フロントエンド (Liquid Glass)                                         ← フロント担当
+crates/devhub-agent  常駐エージェント (ウィンドウ無し。Logitech HID++ のホストモード設定を再適用 = G HUB の代替)
 vendor/              GPU backdrop を足した gpui-pre / gpui-pre-windows (GPU backdrop パッチ)
 docs/NEXT_TASKS.md      次にやること (v4)
 docs/LAMZU_MAYA_X_V2_AUDIT2.md  LAMZU MAYA X V2 再監査 (要修正 P1/P2・名前の対応表・作業順)
@@ -21,6 +22,7 @@ docs/BACKEND_BRIEF.md   Web HUB 完全移植の機能表 (v3)
 docs/ADD_DEVICE.md      新デバイス追加の手順 (別セッション/別エージェント向け)
 docs/PROTOCOL_NOTES.md  Web configurator の解析結果 (コマンド表・アドレス・機能一覧)
 docs/FRONTEND.md        フロントエンドの構造
+docs/LOGITECH_HIDPP.md  Logitech G (PRO Wireless) HID++ 2.0 の解析メモ・常駐エージェントの仕組み (実機未検証)
 ```
 
 ## 現状 (2026-11-15)
@@ -64,6 +66,8 @@ cargo run --release -p device-hub        # 普段使いは release (起動・描
 DEVHUB_DEMO=1 cargo run -p device-hub    # 常にデモ
 DEVHUB_FAST=1 cargo run -p device-hub    # GPU ガラス無効
 cargo run -p devhub-hid --example enum   # HID 列挙
+cargo run -p devhub-hid --example hidpp_probe [-- --sniff]  # Logitech HID++ 機能表ダンプ / 生レポート観察
+cargo run -p devhub-agent                # 常駐エージェント (--install / --uninstall / --once)
 cargo run -p devhub-obs --example preview # OBS 無しでオーバーレイ描画を PNG 確認
 cargo clippy --workspace
 ```

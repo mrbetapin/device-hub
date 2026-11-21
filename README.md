@@ -24,6 +24,9 @@ with a Liquid Glass design.
 - **USB DAC** — parametric EQ editing.
 - **Process automation** — apply saved profiles when a specific app becomes
   foreground, with automatic restore on leave (multi-device profiles supported).
+- **G HUB replacement (Logitech HID++ 2.0)** — PRO Wireless etc. in host mode, kept
+  applied by the always-on background agent `devhub-agent.exe` (starts at logon,
+  re-applies DPI / polling / LED after power-on, sleep and receiver re-plug).
 - **OBS overlay plugin** (`devhub_obs.dll`) — live key/button press-depth source
   that works **fully standalone**: it opens the device itself and every display
   option is configurable from OBS source properties (see `docs/OBS_OVERLAY.md`).
@@ -37,6 +40,7 @@ with a Liquid Glass design.
 | HTS Plus Pro (wired + 2.4GHz dongle) | All settings incl. Rapid Trigger |
 | SU66 Max (Keebforce/Everglide) | Keymap, per-key perf, lighting, macros, live travel |
 | TP55 USB DAC | Parametric EQ |
+| Logitech PRO Wireless (wired + LIGHTSPEED) | DPI, polling, logo LED, host/onboard mode — **implemented from public HID++ 2.0 docs, not yet verified on hardware** ([docs/LOGITECH_HIDPP.md](docs/LOGITECH_HIDPP.md)) |
 
 Other models using the same protocols (mouse.fit report-8/EEPROM, xsyd) are
 detected automatically by capability, not by device name.
@@ -72,7 +76,7 @@ OBS and add a "Device HUB Live" source. The plugin does not need the app.
 To stage a Windows release with its license files, run these commands in PowerShell:
 
 ```powershell
-cargo build --release --locked -p device-hub -p devhub-obs
+cargo build --release --locked -p device-hub -p devhub-obs -p devhub-agent
 ./scripts/package-windows.ps1
 ```
 
@@ -130,6 +134,8 @@ UI は GPUI + Liquid Glass デザイン。
 - **磁気キーボード** — オンボードレイヤー付きキーマップ・キーごとの AP/RT/リセット・
   デッドゾーン・ライティング・高度キー (DKS/MPT/MT/TGL/SOCD/RS)・マクロ・押下深さライブ表示
 - **USB DAC** — パラメトリック EQ
+- **G HUB の代わり (Logitech HID++ 2.0)** — PRO Wireless 等をホストモードで設定し、常駐エージェント
+  `devhub-agent.exe` (ログオン時に起動) が電源投入・スリープ復帰のたびに再適用 (docs/LOGITECH_HIDPP.md)
 - **プロセス連動** — 指定アプリが前面になったらプロファイルを適用、離れたら復帰 (複数デバイス対応)
 - **OBS プラグイン** — 押下深さのライブソース。アプリ無しで単体動作し、設定は OBS プロパティで完結
 - 設定・プロファイルのインポート/エクスポート、元に戻す、プリセット、コマンドパレット

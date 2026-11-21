@@ -20,11 +20,18 @@ use std::sync::{Arc, Mutex};
 /// ATK 系ドライバ。診断 example (atkread) からも使うので公開。
 #[doc(hidden)]
 pub mod atk;
+/// 常駐エージェントの自動起動 (HKCU Run)。
+pub mod autostart;
 #[doc(hidden)]
 pub mod lamzu;
+/// Logitech G (HID++ 2.0)。診断 example (hidpp_probe) からも使うので公開。
+#[doc(hidden)]
+pub mod logitech;
 #[allow(dead_code)]
 mod mousefit;
 mod mousefit8;
+/// 再適用を担当するプロセスの決定 (GUI / エージェント)。
+pub mod owner;
 /// 生 HID チャネル。診断 example (axraw 等) が直接フレームを投げるために公開。
 #[doc(hidden)]
 pub mod transport;
@@ -53,6 +60,7 @@ fn driver_ready(kind: DriverKind) -> bool {
         DriverKind::Walkplay => true,
         DriverKind::Atk => true,
         DriverKind::Lamzu => true,
+        DriverKind::Logitech => true,
         DriverKind::Unsupported => false,
     }
 }
@@ -198,7 +206,7 @@ impl HubBackend for RealHub {
                 Err(e) => return Err(HubError::Io(format!("open {}: {e}", spec.name))),
             };
             drop(api);
-            let drv = self.make_driver(spec, dev, id)?;
+            let drv = self.make_driver(spec, dev, &path, id)?;
             let same = self
                 .paths
                 .lock()
@@ -234,6 +242,7 @@ impl RealHub {
         &self,
         spec: &registry::KnownDevice,
         dev: hidapi::HidDevice,
+        path: &CString,
         id: &DeviceId,
     ) -> HubResult<Arc<dyn DeviceDriver>> {
         let name = self
@@ -287,6 +296,7 @@ impl RealHub {
             DriverKind::Walkplay => Arc::new(walkplay::open(dev, info)?),
             DriverKind::Atk => Arc::new(atk::open(dev, info, events)?),
             DriverKind::Lamzu => Arc::new(lamzu::open(dev, info, events)?),
+            DriverKind::Logitech => Arc::new(logitech::open(dev, path.clone(), info, events)?),
             DriverKind::Unsupported => {
                 return Err(HubError::NotImplemented("このデバイスのドライバ"))
             }
@@ -321,4 +331,24 @@ fn fxhash(b: &[u8]) -> u32 {
         h = h.wrapping_mul(0x01000193);
     }
     h
+}
+
+/// 診断ログ (`DEVHUB_AGENT_LOG` のファイル、未設定なら何もしない)。
+/// 常駐エージェントが起動時に設定する — 再適用の成否を後から追えるように。
+pub fn agent_log(msg: &str) {
+    use std::io::Write;
+    let Some(p) = std::env::var_os("DEVHUB_AGENT_LOG") else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(p)
+    {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{t}] {msg}");
+    }
 }

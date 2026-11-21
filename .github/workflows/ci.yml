@@ -2,8 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "logitech-*"]
   pull_request:
+  workflow_dispatch:
 
 # 同じブランチへの連続 push では古い run を自動キャンセル。
 concurrency:
@@ -22,7 +23,7 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
       - name: Release build
-        run: cargo build --release --locked -p device-hub -p devhub-obs
+        run: cargo build --release --locked -p device-hub -p devhub-obs -p devhub-agent
       - name: Stage Windows distribution
         run: ./scripts/package-windows.ps1
       - uses: actions/upload-artifact@v4

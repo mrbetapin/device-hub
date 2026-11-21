@@ -12,6 +12,8 @@ $pluginLicenses = Join-Path $plugin 'licenses'
 
 New-Item -ItemType Directory -Force -Path $bin, $locale, $licenses, $pluginLicenses | Out-Null
 Copy-Item -LiteralPath (Join-Path $root 'target/release/device-hub.exe') -Destination $OutputDirectory
+# 常駐エージェント (Logitech HID++ の再適用)。device-hub.exe と同じフォルダに置く前提。
+Copy-Item -LiteralPath (Join-Path $root 'target/release/devhub-agent.exe') -Destination $OutputDirectory
 Copy-Item -LiteralPath (Join-Path $root 'target/release/devhub_obs.dll') -Destination $bin
 Copy-Item -Path (Join-Path $root 'crates/devhub-obs/data/locale/*.ini') -Destination $locale
 

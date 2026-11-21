@@ -52,6 +52,30 @@ const fn mf(
     }
 }
 
+/// Logitech G (HID++ 2.0)。設定は vendor IF の **long report (0x11, 20B) コレクション**
+/// `FF00:0002` で話す (Windows は short 0x10 を `FF00:0001` の別コレクションに分ける)。
+/// LIGHTSPEED レシーバーはペア先マウスを device index 1..6 で中継、有線は 0xFF。
+const fn logi(
+    pid: u16,
+    model: &'static str,
+    name: &'static str,
+    transport: Transport,
+) -> KnownDevice {
+    KnownDevice {
+        vid: 0x046D,
+        pid,
+        usage_page: Some(0xFF00),
+        usage: Some(0x02),
+        kind: DeviceKind::Mouse,
+        vendor: "Logitech",
+        model,
+        name,
+        transport,
+        driver: DriverKind::Logitech,
+        verified: false,
+    }
+}
+
 /// 対応表。新デバイスはここへ追加する。
 ///
 /// mouse.fit の PID は `https://www.mouse.fit/Config/env-models.json` (2026-11 取得) の
@@ -265,6 +289,57 @@ pub const KNOWN: &[KnownDevice] = &[
         driver: DriverKind::Lamzu,
         verified: false,
     },
+    // ---------------------------------------------------------------- マウス (Logitech G / HID++ 2.0)
+    // G HUB の代替。PID は公開情報 (Solaar / libratbag の機種表) から — 実機未検証。
+    // 表示名は接続後に DeviceName (0x0005) で実機の名前に置き換わる。
+    logi(
+        0xC539,
+        "logi-lightspeed",
+        "Logitech G LIGHTSPEED",
+        Transport::Wireless24G,
+    ),
+    logi(
+        0xC53A,
+        "logi-lightspeed",
+        "Logitech G POWERPLAY",
+        Transport::Wireless24G,
+    ),
+    logi(
+        0xC53F,
+        "logi-lightspeed",
+        "Logitech G LIGHTSPEED",
+        Transport::Wireless24G,
+    ),
+    logi(
+        0xC547,
+        "logi-lightspeed",
+        "Logitech G LIGHTSPEED",
+        Transport::Wireless24G,
+    ),
+    logi(
+        0xC54D,
+        "logi-lightspeed",
+        "Logitech G LIGHTSPEED",
+        Transport::Wireless24G,
+    ),
+    logi(
+        0xC088,
+        "logi-pro-wireless",
+        "PRO Wireless",
+        Transport::Wired,
+    ),
+    logi(
+        0xC094,
+        "logi-pro-x-superlight",
+        "PRO X SUPERLIGHT",
+        Transport::Wired,
+    ),
+    logi(
+        0xC09B,
+        "logi-pro-x-superlight-2",
+        "PRO X SUPERLIGHT 2",
+        Transport::Wired,
+    ),
 ];
 
 /// 列挙結果 (VID/PID/usage) に合う既知デバイス。`0xFFFF` のプレースホルダは一致しない。

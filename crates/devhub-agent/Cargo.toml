@@ -1,0 +1,10 @@
+[package]
+name = "devhub-agent"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Device HUB 常駐エージェント — ウィンドウ無しで常時起動し、Logitech (HID++) マウスのホストモード設定を接続・復帰のたびに再適用する (G HUB の代替)"
+
+[dependencies]
+devhub-core = { path = "../devhub-core" }
+devhub-hid = { path = "../devhub-hid" }
