@@ -230,7 +230,15 @@ impl AutoRules {
             return;
         };
         match serde_json::from_slice::<PrefsFile>(&bytes) {
-            Ok(p) => self.set(p),
+            Ok(p) => {
+                self.set(p);
+                crate::agent_log(&format!(
+                    "プロセス連動: ルール {} 件 (有効 {} 件)・プロファイル {} 件を読み込み",
+                    self.rules.len(),
+                    self.rules.iter().filter(|r| r.enabled).count(),
+                    self.profiles.len()
+                ));
+            }
             Err(e) => crate::agent_log(&format!("prefs.json を読めません: {e}")),
         }
     }
@@ -282,6 +290,9 @@ impl AutoRules {
             return vec![];
         };
         let stable = self.last_fg.as_deref() == Some(fg.as_str());
+        if !stable {
+            crate::agent_log(&format!("プロセス連動: 前面 = {fg}"));
+        }
         self.last_fg = Some(fg.clone());
         if !stable {
             return vec![];

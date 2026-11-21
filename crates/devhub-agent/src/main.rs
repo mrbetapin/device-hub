@@ -152,7 +152,11 @@ fn run_rules(
     }
     for a in rules.tick(devhub_hid::autorule::foreground_exe()) {
         let Some(d) = open.get(&DeviceId(a.device.clone())) else {
-            agent_log(&format!("プロセス連動: 「{}」の対象デバイスが未接続", a.label));
+            let have: Vec<&str> = open.keys().map(|k| k.0.as_str()).collect();
+            agent_log(&format!(
+                "プロセス連動: 「{}」の対象デバイス {} が未接続 (開いているもの: {have:?})",
+                a.label, a.device
+            ));
             continue;
         };
         let mut failed = 0;
