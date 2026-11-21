@@ -56,6 +56,8 @@ fn main() {
         return;
     }
     agent_log(&format!("起動 (pid {})", std::process::id()));
+    // GUI が「同じ版のエージェントか」を確かめるための自己紹介。
+    devhub_hid::autostart::write_agent_info();
     // 先にオーナーを取る (GUI が先に取っていれば、GUI 終了後に引き継ぐ)。
     devhub_hid::owner::is_owner();
 

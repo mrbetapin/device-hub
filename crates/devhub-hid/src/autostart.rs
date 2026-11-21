@@ -114,13 +114,66 @@ pub fn set(_on: bool) -> HubResult<()> {
     Err(HubError::Unsupported("autostart"))
 }
 
-/// GUI の起動時に呼ぶ: 自動起動が ON なら、登録先をこの exe と同じフォルダのエージェントに
-/// 更新し (別フォルダの古いビルドを指したままにしない)、エージェントを起動する
-/// (常駐中なら新しい方はすぐ終了する)。
+/// 常駐中のエージェントが書く自己紹介 (`pid\nexe のパス`)。古い版は書かない。
+fn info_path() -> PathBuf {
+    std::env::temp_dir().join("devhub_agent.info")
+}
+
+/// エージェントが起動直後 (多重起動チェックの後) に呼ぶ。
+pub fn write_agent_info() {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    std::fs::write(info_path(), format!("{}\n{exe}", std::process::id())).ok();
+}
+
+/// エージェントが常駐中か (多重起動防止のロックが取られているか)。
+fn agent_running() -> bool {
+    let p = std::env::temp_dir().join("devhub_agent.lock");
+    p.exists() && crate::owner::open_exclusive(&p).is_none()
+}
+
+/// 常駐中のエージェントが `ours` と同じ exe か (自己紹介が無い = 古い版は false)。
+fn running_is(ours: &std::path::Path) -> bool {
+    std::fs::read_to_string(info_path())
+        .ok()
+        .and_then(|s| s.lines().nth(1).map(|l| l.trim().to_lowercase()))
+        .is_some_and(|p| p == ours.display().to_string().to_lowercase())
+}
+
+#[cfg(windows)]
+fn kill_agents() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("taskkill")
+        .args(["/F", "/IM", AGENT_EXE])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok();
+    std::fs::remove_file(info_path()).ok();
+}
+
+#[cfg(not(windows))]
+fn kill_agents() {}
+
+/// GUI の起動時に呼ぶ: 自動起動が ON なら、
+/// - 常駐中のエージェントが別フォルダ/古い版なら終了させ (古い版は本体プロファイル編集を知らず、
+///   マウスをホストモードへ戻してしまう)、
+/// - 登録先をこの exe と同じフォルダのエージェントに更新して起動する
+///   (同じ版が常駐中なら新しい方はすぐ終了する)。
 pub fn ensure_running() {
-    if is_enabled() {
-        if let Err(e) = set(true) {
-            crate::agent_log(&format!("エージェントの起動に失敗: {e}"));
-        }
+    if !is_enabled() {
+        return;
+    }
+    let Some(ours) = agent_path() else {
+        return;
+    };
+    if agent_running() && !running_is(&ours) {
+        crate::agent_log("別の場所/古い版のエージェントが常駐中 — 終了して入れ替えます");
+        kill_agents();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    if let Err(e) = set(true) {
+        crate::agent_log(&format!("エージェントの起動に失敗: {e}"));
     }
 }
