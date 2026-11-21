@@ -434,7 +434,7 @@ impl Shell {
                 0.,
                 max_delay as f32,
                 1.,
-                "ms",
+                "",
                 window,
                 cx,
                 Rc::new(move |this: &mut Shell, v: f32, cx: &mut Context<Shell>| {
@@ -476,6 +476,7 @@ impl Shell {
                     .child(ui::stepper_input(
                         &format!("mev-d-{i}"),
                         &delay_in,
+                        "ms",
                         delay > 0,
                         delay < max_delay,
                         cx,

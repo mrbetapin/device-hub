@@ -1216,7 +1216,13 @@ impl Shell {
     fn commit_input(&mut self, key: &str, v: String, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = key.strip_prefix("num:") {
             // 数値入力: パースできなければ現在表示のまま (次のレンダリングで正規形に戻る)。
-            let v = v.trim().replace(',', ".");
+            // 表示は単位付き ("1.5mm" など) のことがある — 末尾の単位は無視して数値だけ読む。
+            let v = v
+                .trim()
+                .replace(',', ".")
+                .trim_end_matches(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .trim()
+                .to_string();
             if let (Ok(v), Some((min, max, step, f))) =
                 (v.parse::<f32>(), self.num_fields.get(id).cloned())
             {

@@ -875,18 +875,36 @@ pub fn stepper_custom(
 }
 
 /// `stepper_custom` の中央に数値入力欄を置いたもの (直接入力もできるステッパー)。
+/// 入力欄は数字だけ — 単位 `unit` は欄の外に固定表示する。
+#[allow(clippy::too_many_arguments)]
 pub fn stepper_input(
     id: &str,
     input: &Entity<InputState>,
+    unit: &str,
     can_dec: bool,
     can_inc: bool,
     cx: &mut Context<Shell>,
     dec: impl Fn(&mut Shell, &mut Context<Shell>) + 'static,
     inc: impl Fn(&mut Shell, &mut Context<Shell>) + 'static,
 ) -> Div {
+    let p = theme::pal();
     let center = div()
-        .w(px(78.))
-        .child(gpui_kit::component::input::Input::new(input))
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .child(
+            div()
+                .w(px(64.))
+                .child(gpui_kit::component::input::Input::new(input)),
+        )
+        .when(!unit.is_empty(), |d| {
+            d.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(p.sub)
+                    .child(unit.to_string()),
+            )
+        })
         .into_any_element();
     stepper_with(id, center, can_dec, can_inc, cx, dec, inc)
 }
