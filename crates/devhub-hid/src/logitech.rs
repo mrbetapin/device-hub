@@ -337,7 +337,11 @@ pub fn led_params(effect_id: u16, st: &LightingState) -> [u8; 10] {
     let intensity = st.brightness.clamp(1, 100);
     match effect_id {
         led::STATIC => {
-            p[0..3].copy_from_slice(&[c.r, c.g, c.b]);
+            // 固定色には明るさの欄が無い — 色に明るさを掛けて送る
+            // (全体の明るさ 0x8040 がある機種はさらにそれが掛かる)。
+            let k = st.brightness.min(100) as u16;
+            let dim = |v: u8| ((v as u16 * k + 50) / 100) as u8;
+            p[0..3].copy_from_slice(&[dim(c.r), dim(c.g), dim(c.b)]);
             // p[3] = ramp (0 = 既定)
         }
         led::PULSE => {
@@ -2049,7 +2053,17 @@ mod tests {
             palette_sel: 0,
             color_correction: None,
         };
-        assert_eq!(&led_params(led::STATIC, &st)[..4], &[1, 2, 3, 0]);
+        // 固定色は明るさ (80%) を色に掛ける。
+        let bright = LightingState {
+            color: Rgb::new(255, 100, 0),
+            ..st.clone()
+        };
+        assert_eq!(&led_params(led::STATIC, &bright)[..4], &[204, 80, 0, 0]);
+        let full = LightingState {
+            brightness: 100,
+            ..bright.clone()
+        };
+        assert_eq!(&led_params(led::STATIC, &full)[..3], &[255, 100, 0]);
         let b = led_params(led::BREATHE, &st);
         assert_eq!(&b[..7], &[1, 2, 3, 0x03, 0xE8, 0, 80]);
         let c = led_params(led::CYCLE, &st);
