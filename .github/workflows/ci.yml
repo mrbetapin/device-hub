@@ -18,6 +18,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Rust toolchain (rust-toolchain.toml)
         run: rustup show
+      # target/ と ~/.cargo をキャッシュ (Cargo.lock + toolchain がキー)。main 以外の push でも保存する。
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Check
         run: cargo check --workspace --locked
       - name: Test
@@ -30,3 +34,10 @@ jobs:
         with:
           name: device-hub-windows-x64
           path: dist/
+      # 実機解析用 (配布物には入れない)。G HUB を終了してから実行する。
+      - name: Build hidpp_probe
+        run: cargo build --release --locked -p devhub-hid --example hidpp_probe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hidpp-probe
+          path: target/release/examples/hidpp_probe.exe

@@ -15,7 +15,7 @@
 //!
 //! G HUB は終了してから使うこと (同じ IF で要求を取り合う)。
 
-use devhub_hid::logitech::{feat, probe};
+use devhub_hid::logitech::{device_type_name, feat, probe};
 
 fn main() {
     let api = hidapi::HidApi::new().expect("hidapi");
@@ -89,24 +89,42 @@ fn main() {
             continue;
         };
         match probe(&h, wireless) {
-            Ok(r) => {
-                println!(
-                    "  device index = {:#04x}, HID++ {}.x",
-                    r.dev_idx, r.protocol
-                );
-                println!(
-                    "  {:>5}  {:>6}  {:>4}  {:>3}  名前",
-                    "index", "ID", "type", "ver"
-                );
-                for (id, idx, ty, ver) in r.features {
-                    // type: bit7 obsolete, bit6 hidden, bit5 engineering
+            Ok(reports) => {
+                for r in reports {
                     println!(
-                        "  {idx:>5}  0x{id:04X}  0x{ty:02x}  {ver:>3}  {}",
-                        feat::name(id)
+                        "\n  -- device index = {:#04x}, HID++ {}.x, 名前 = {:?}, 種別 = {}",
+                        r.dev_idx,
+                        r.protocol,
+                        r.name.as_deref().unwrap_or("?"),
+                        r.device_type
+                            .map(|t| format!("{t} ({})", device_type_name(t)))
+                            .unwrap_or_else(|| "?".into())
                     );
+                    println!(
+                        "  {:>5}  {:>6}  {:>4}  {:>3}  名前",
+                        "index", "ID", "type", "ver"
+                    );
+                    for (id, idx, ty, ver) in &r.features {
+                        // type: bit7 obsolete, bit6 hidden, bit5 engineering
+                        println!(
+                            "  {idx:>5}  0x{id:04X}  0x{ty:02x}  {ver:>3}  {}",
+                            feat::name(*id)
+                        );
+                    }
+                    println!("  [詳細 (情報取得のみ)]");
+                    for (label, res) in &r.details {
+                        match res {
+                            Ok(b) => {
+                                let hex: Vec<String> =
+                                    b.iter().map(|x| format!("{x:02x}")).collect();
+                                println!("    {label:<34} {}", hex.join(" "));
+                            }
+                            Err(e) => println!("    {label:<34} ERR {e}"),
+                        }
+                    }
                 }
             }
-            Err(e) => println!("  応答なし: {e} (無線ならマウスを動かして起こしてから再実行)"),
+            Err(e) => println!("  応答なし: {e} (無線ならマウス/キーボードを操作して起こしてから再実行)"),
         }
     }
 }

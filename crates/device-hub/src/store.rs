@@ -618,9 +618,10 @@ impl Hub {
                         // 逆方向 (d→s) で上書きすると 2 秒ごとに asleep が消える。
                         d.asleep = s.info.asleep;
                         // ドングル内側機種の確定名も同様 (列挙は受信機名を返す)。
-                        if s.info.model != d.model {
+                        if s.info.model != d.model || s.info.kind != d.kind {
                             d.name = s.info.name.clone();
                             d.model = s.info.model.clone();
+                            d.kind = s.info.kind;
                         }
                         if d.battery.is_none() {
                             d.battery = s.info.battery;
@@ -655,6 +656,7 @@ impl Hub {
                         // (EID 検出 — mousefit8::maybe_detect)。
                         d.name = info.name.clone();
                         d.model = info.model.clone();
+                        d.kind = info.kind;
                         if info.battery.is_some() {
                             d.battery = info.battery;
                         }
@@ -930,7 +932,9 @@ impl Hub {
                         if let Some(s) = self.sessions.get_mut(&id) {
                             // 休眠→覚醒の遷移: 寝ている間に読まれた空の状態を読み直す。
                             woke = s.info.asleep && !info.asleep;
-                            renamed = s.info.model != info.model || s.info.name != info.name;
+                            renamed = s.info.model != info.model
+                                || s.info.name != info.name
+                                || s.info.kind != info.kind;
                             s.info.asleep = info.asleep;
                             if info.battery.is_some() {
                                 s.info.battery = info.battery;
@@ -938,6 +942,7 @@ impl Hub {
                             if renamed {
                                 s.info.name = info.name.clone();
                                 s.info.model = info.model.clone();
+                                s.info.kind = info.kind;
                                 let _ = s.tx.send(Job::Open);
                             }
                         }
@@ -946,6 +951,7 @@ impl Hub {
                             if renamed {
                                 d.name = info.name.clone();
                                 d.model = info.model.clone();
+                                d.kind = info.kind;
                             }
                             if info.battery.is_some() {
                                 d.battery = info.battery;

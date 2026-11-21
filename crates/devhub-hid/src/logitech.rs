@@ -55,6 +55,16 @@ pub mod feat {
     pub const ADJUSTABLE_DPI: u16 = 0x2201;
     pub const REPORT_RATE: u16 = 0x8060;
     pub const COLOR_LED_EFFECTS: u16 = 0x8070;
+    pub const RGB_EFFECTS: u16 = 0x8071;
+    pub const PER_KEY_LIGHTING: u16 = 0x8080;
+    pub const PER_KEY_LIGHTING_V2: u16 = 0x8081;
+    pub const BRIGHTNESS_CONTROL: u16 = 0x8040;
+    pub const GKEY: u16 = 0x8010;
+    pub const MKEYS: u16 = 0x8020;
+    pub const MR: u16 = 0x8030;
+    pub const EXT_REPORT_RATE: u16 = 0x8061;
+    pub const KEYBOARD_LAYOUT_2: u16 = 0x4540;
+    pub const DISABLE_KEYS_BY_USAGE: u16 = 0x4522;
     pub const ONBOARD_PROFILES: u16 = 0x8100;
 
     /// 名前 (プローブ表示用)。
@@ -92,6 +102,28 @@ pub mod feat {
             0x8061 => "ExtendedAdjustableReportRate",
             0x8070 => "ColorLedEffects",
             0x8071 => "RgbEffects",
+            0x8080 => "PerKeyLighting",
+            0x8081 => "PerKeyLightingV2",
+            0x8010 => "GKey",
+            0x8020 => "MKeys",
+            0x8030 => "MR",
+            0x8040 => "BrightnessControl",
+            0x8111 => "LatencyMonitoring",
+            0x40A0 => "FnInversion",
+            0x40A2 => "NewFnInversion",
+            0x4220 => "LockKeyState",
+            0x4520 => "KeyboardLayout",
+            0x4521 => "KeyboardDisableKeys",
+            0x4522 => "KeyboardDisableByUsage",
+            0x4530 => "DualPlatform",
+            0x4531 => "MultiPlatform",
+            0x4540 => "KeyboardLayout2",
+            0x1981 => "Backlight",
+            0x1982 => "Backlight2",
+            0x1983 => "Backlight3",
+            0x1990 => "Illumination",
+            0x1C00 => "PersistentRemappableAction",
+            0x1F1F => "FirmwareProperties",
             0x8090 => "ModeStatus",
             0x8100 => "OnboardProfiles",
             0x8110 => "MouseButtonSpy",
@@ -398,6 +430,7 @@ struct Features {
     dpi_cid: Option<u16>,
     name: Option<String>,
     fw: Option<String>,
+    kind: Option<DeviceKind>,
 }
 
 impl Features {
@@ -623,6 +656,14 @@ impl Inner {
                 f.name = Some(s);
             }
         }
+        // 種別 (DeviceName.getDeviceType)。レシーバーの登録は一律マウスなので実機の値で直す。
+        if let Ok(p) = call(feat::DEVICE_NAME, 2, &[]) {
+            f.kind = match p[0] {
+                0 | 2 => Some(DeviceKind::Keyboard),
+                3..=5 => Some(DeviceKind::Mouse),
+                _ => None,
+            };
+        }
         // ファームウェア (エンティティのうち type 0 = 主アプリ)。
         if let Ok(p) = call(feat::FW_VERSION, 0, &[]) {
             for e in 0..p[0].min(8) {
@@ -681,6 +722,16 @@ impl Inner {
             let mut info = self.lock_info();
             if let Some(n) = &f.name {
                 info.name = n.clone();
+                // レシーバー経由は registry の model がレシーバー共通 (logi-lightspeed)。
+                // プリセット・ファーム状態を機種ごとに分けるため実機名から作る。
+                if self.wireless {
+                    if let Some(m) = model_from_name(n) {
+                        info.model = m;
+                    }
+                }
+            }
+            if let Some(k) = f.kind {
+                info.kind = k;
             }
             info.firmware = f.fw.clone();
             info.asleep = false;
@@ -1066,6 +1117,20 @@ fn spawn_listener(inner: Arc<Inner>) {
 }
 
 // ====================================================================== 契約の実装
+
+/// 実機名 → model ID ("G915 X LS TKL" → "logi-g915-x-ls-tkl")。
+/// 有線の registry と同じ形 (G502 X LIGHTSPEED → logi-g502-x-lightspeed)。
+pub fn model_from_name(name: &str) -> Option<String> {
+    let mut out = String::from("logi");
+    for w in name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| !w.is_empty())
+    {
+        out.push('-');
+        out.push_str(&w.to_ascii_lowercase());
+    }
+    (out.len() > 4).then_some(out)
+}
 
 fn zone_name(location: u16, index: u8) -> String {
     match location {
@@ -1529,12 +1594,44 @@ impl DeviceDriver for LogiDriver {
 pub struct ProbeReport {
     pub dev_idx: u8,
     pub protocol: u8,
+    /// DeviceName (0x0005) の名前。
+    pub name: Option<String>,
+    /// DeviceName.getDeviceType (0 = キーボード, 3 = マウス …)。
+    pub device_type: Option<u8>,
     /// (feature ID, index, type flags, version)
     pub features: Vec<(u16, u8, u8, u8)>,
+    /// 機能ごとの情報取得 (読むだけの関数) の生応答。(ラベル, 応答 16B)
+    pub details: Vec<(String, Result<[u8; 16], String>)>,
 }
 
-/// FeatureSet (0x0001) で全機能表を列挙する。
-pub fn probe(dev: &hidapi::HidDevice, wireless: bool) -> HubResult<ProbeReport> {
+/// DeviceName.getDeviceType の値 → 名前。
+pub fn device_type_name(t: u8) -> &'static str {
+    match t {
+        0 => "Keyboard",
+        1 => "RemoteControl",
+        2 => "Numpad",
+        3 => "Mouse",
+        4 => "Trackpad",
+        5 => "Trackball",
+        6 => "Presenter",
+        7 => "Receiver",
+        8 => "Headset",
+        9 => "Webcam",
+        10 => "SteeringWheel",
+        11 => "Joystick",
+        12 => "Gamepad",
+        13 => "Dock",
+        14 => "Speaker",
+        15 => "Microphone",
+        _ => "?",
+    }
+}
+
+/// FeatureSet (0x0001) で全機能表を列挙する。レシーバーならペア先 1..6 を全部。
+///
+/// 機能表に加え、照明・キー系の機能について **情報取得の関数だけ** を呼んで生応答を残す
+/// (書き込み・状態変更をする関数は呼ばない)。
+pub fn probe(dev: &hidapi::HidDevice, wireless: bool) -> HubResult<Vec<ProbeReport>> {
     let sw = 0x0E;
     let rq = |d: u8, fi: u8, func: u8, params: &[u8]| -> HubResult<[u8; 16]> {
         let mut buf = [0u8; 64];
@@ -1557,6 +1654,7 @@ pub fn probe(dev: &hidapi::HidDevice, wireless: bool) -> HubResult<ProbeReport> 
     } else {
         vec![DEV_WIRED]
     };
+    let mut reports = vec![];
     for d in cands {
         let Ok(p) = rq(d, 0, 1, &[0, 0, 0x5A]) else {
             continue;
@@ -1564,22 +1662,116 @@ pub fn probe(dev: &hidapi::HidDevice, wireless: bool) -> HubResult<ProbeReport> 
         let mut out = ProbeReport {
             dev_idx: d,
             protocol: p[0],
+            name: None,
+            device_type: None,
             features: vec![(0, 0, 0, 0)],
+            details: vec![],
         };
         let fs = rq(d, 0, 0, &[0x00, 0x01])?;
-        if fs[0] == 0 {
-            return Ok(out);
-        }
-        let count = rq(d, fs[0], 0, &[])?[0];
-        for i in 1..=count {
-            if let Ok(e) = rq(d, fs[0], 1, &[i]) {
-                out.features
-                    .push((u16::from_be_bytes([e[0], e[1]]), i, e[2], e[3]));
+        if fs[0] != 0 {
+            let count = rq(d, fs[0], 0, &[])?[0];
+            for i in 1..=count {
+                if let Ok(e) = rq(d, fs[0], 1, &[i]) {
+                    out.features
+                        .push((u16::from_be_bytes([e[0], e[1]]), i, e[2], e[3]));
+                }
             }
         }
-        return Ok(out);
+        let fidx = |id: u16| out.features.iter().find(|f| f.0 == id).map(|f| f.1);
+        let mut det: Vec<(String, Result<[u8; 16], String>)> = vec![];
+        let mut dump = |label: String, fi: u8, func: u8, params: &[u8]| {
+            let r = rq(d, fi, func, params).map_err(|e| e.to_string());
+            det.push((label, r.clone()));
+            r
+        };
+
+        if let Some(fi) = fidx(feat::DEVICE_NAME) {
+            if let Ok(c) = rq(d, fi, 0, &[]) {
+                let len = c[0] as usize;
+                let mut name = Vec::new();
+                while name.len() < len {
+                    let Ok(chunk) = rq(d, fi, 1, &[name.len() as u8]) else {
+                        break;
+                    };
+                    let take = (len - name.len()).min(16);
+                    name.extend_from_slice(&chunk[..take]);
+                }
+                out.name = Some(String::from_utf8_lossy(&name).trim_matches('\0').to_string());
+            }
+            out.device_type = rq(d, fi, 2, &[]).ok().map(|t| t[0]);
+        }
+        // ColorLedEffects (0x8070): 0=getInfo, 1=getZoneInfo(z), 2=getZoneEffectInfo(z,e)
+        if let Some(fi) = fidx(feat::COLOR_LED_EFFECTS) {
+            if let Ok(p) = dump("8070 getInfo".into(), fi, 0, &[]) {
+                for z in 0..p[0].min(8) {
+                    if let Ok(zi) = dump(format!("8070 zone {z}"), fi, 1, &[z]) {
+                        for e in 0..zi[3].min(16) {
+                            let _ = dump(format!("8070 zone {z} effect {e}"), fi, 2, &[z, e]);
+                        }
+                    }
+                }
+            }
+        }
+        // RgbEffects (0x8071): 0=getInfo(cluster, effect, type)。0xFF = 全体/クラスタ自身。
+        if let Some(fi) = fidx(feat::RGB_EFFECTS) {
+            let _ = dump("8071 getInfo(FF,FF,00) device".into(), fi, 0, &[0xFF, 0xFF, 0x00]);
+            let _ = dump("8071 getInfo(FF,FF,01)".into(), fi, 0, &[0xFF, 0xFF, 0x01]);
+            for c in 0..8u8 {
+                let Ok(ci) = dump(format!("8071 cluster {c}"), fi, 0, &[c, 0xFF, 0x00]) else {
+                    break;
+                };
+                // 応答の効果数の位置は未確定なので、ありそうな位置の最大で回す。
+                let n = ci[4].max(ci[3]).clamp(1, 16);
+                for e in 0..n {
+                    if dump(format!("8071 cluster {c} effect {e}"), fi, 0, &[c, e, 0x00]).is_err() {
+                        break;
+                    }
+                }
+            }
+            // 取得系 (getSwControl 相当と思われる 5 番) は引数なしで読むだけ。
+            let _ = dump("8071 fn5()".into(), fi, 5, &[]);
+        }
+        // PerKeyLighting (0x8080 / 0x8081): 0=getInfo(type, page)。
+        for id in [feat::PER_KEY_LIGHTING, feat::PER_KEY_LIGHTING_V2] {
+            if let Some(fi) = fidx(id) {
+                for ty in 0..2u8 {
+                    for page in 0..4u8 {
+                        let _ = dump(format!("{id:04X} getInfo({ty},{page})"), fi, 0, &[ty, page]);
+                    }
+                }
+            }
+        }
+        for id in [
+            feat::BRIGHTNESS_CONTROL,
+            feat::GKEY,
+            feat::MKEYS,
+            feat::MR,
+            feat::REPORT_RATE,
+            feat::EXT_REPORT_RATE,
+            feat::ONBOARD_PROFILES,
+            feat::KEYBOARD_LAYOUT_2,
+            feat::DISABLE_KEYS_BY_USAGE,
+            feat::BATTERY_STATUS,
+            feat::UNIFIED_BATTERY,
+        ] {
+            if let Some(fi) = fidx(id) {
+                let _ = dump(format!("{id:04X} fn0()"), fi, 0, &[]);
+            }
+        }
+        if let Some(fi) = fidx(feat::REPROG_CONTROLS_V4) {
+            if let Ok(p) = dump("1B04 getCount".into(), fi, 0, &[]) {
+                for i in 0..p[0].min(64) {
+                    let _ = dump(format!("1B04 control {i}"), fi, 1, &[i]);
+                }
+            }
+        }
+        out.details = det;
+        reports.push(out);
     }
-    Err(HubError::Protocol("応答するデバイスがありません".into()))
+    if reports.is_empty() {
+        return Err(HubError::Protocol("応答するデバイスがありません".into()));
+    }
+    Ok(reports)
 }
 
 // ====================================================================== テスト
@@ -1707,6 +1899,19 @@ mod tests {
             serde_json::from_str::<Saved>("{}").unwrap(),
             Saved::default()
         );
+    }
+
+    #[test]
+    fn model_names() {
+        assert_eq!(
+            model_from_name("G915 X LS TKL").as_deref(),
+            Some("logi-g915-x-ls-tkl")
+        );
+        assert_eq!(
+            model_from_name("G502 X LIGHTSPEED").as_deref(),
+            Some("logi-g502-x-lightspeed")
+        );
+        assert_eq!(model_from_name("  "), None);
     }
 
     #[test]
