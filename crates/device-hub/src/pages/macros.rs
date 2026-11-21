@@ -427,6 +427,23 @@ impl Shell {
             let on = self.macro_event_sel == Some(i);
             let down = e.edge == MacroEdge::Down;
             let delay = e.delay_ms;
+            // 遅延は直接入力もできる (確定で下書きへ反映)。
+            let delay_in = self.num_field(
+                &format!("mev-d-{i}"),
+                delay as f32,
+                0.,
+                max_delay as f32,
+                1.,
+                "ms",
+                window,
+                cx,
+                Rc::new(move |this: &mut Shell, v: f32, cx: &mut Context<Shell>| {
+                    if let Some(e) = this.macro_draft.as_mut().and_then(|d| d.events.get_mut(i)) {
+                        e.delay_ms = (v.max(0.).round() as u32).min(max_delay);
+                    }
+                    cx.notify();
+                }),
+            );
             events = events.child(
                 div()
                     .id(SharedString::from(format!("mev-{i}")))
@@ -456,9 +473,9 @@ impl Shell {
                         event_label(e),
                         if down { "押す" } else { "離す" }
                     )))
-                    .child(ui::stepper_custom(
+                    .child(ui::stepper_input(
                         &format!("mev-d-{i}"),
-                        format!("{delay}ms"),
+                        &delay_in,
                         delay > 0,
                         delay < max_delay,
                         cx,

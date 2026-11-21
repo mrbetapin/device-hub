@@ -863,6 +863,43 @@ pub fn stepper_custom(
     dec: impl Fn(&mut Shell, &mut Context<Shell>) + 'static,
     inc: impl Fn(&mut Shell, &mut Context<Shell>) + 'static,
 ) -> Div {
+    let center = div()
+        .min_w(px(58.))
+        .flex()
+        .justify_center()
+        .text_size(px(12.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(text)
+        .into_any_element();
+    stepper_with(id, center, can_dec, can_inc, cx, dec, inc)
+}
+
+/// `stepper_custom` の中央に数値入力欄を置いたもの (直接入力もできるステッパー)。
+pub fn stepper_input(
+    id: &str,
+    input: &Entity<InputState>,
+    can_dec: bool,
+    can_inc: bool,
+    cx: &mut Context<Shell>,
+    dec: impl Fn(&mut Shell, &mut Context<Shell>) + 'static,
+    inc: impl Fn(&mut Shell, &mut Context<Shell>) + 'static,
+) -> Div {
+    let center = div()
+        .w(px(78.))
+        .child(gpui_kit::component::input::Input::new(input))
+        .into_any_element();
+    stepper_with(id, center, can_dec, can_inc, cx, dec, inc)
+}
+
+fn stepper_with(
+    id: &str,
+    center: AnyElement,
+    can_dec: bool,
+    can_inc: bool,
+    cx: &mut Context<Shell>,
+    dec: impl Fn(&mut Shell, &mut Context<Shell>) + 'static,
+    inc: impl Fn(&mut Shell, &mut Context<Shell>) + 'static,
+) -> Div {
     let p = theme::pal();
     let btn = |sid: String, ic: &str, enabled: bool| {
         div()
@@ -895,15 +932,7 @@ pub fn stepper_custom(
                 },
             )),
         )
-        .child(
-            div()
-                .min_w(px(58.))
-                .flex()
-                .justify_center()
-                .text_size(px(12.5))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(text),
-        )
+        .child(center)
         .child(
             btn(format!("sc-{id}-p"), "plus", can_inc).on_click(cx.listener(
                 move |this, _, _, cx| {
