@@ -1604,6 +1604,32 @@ pub struct ProbeReport {
     pub details: Vec<(String, Result<[u8; 16], String>)>,
 }
 
+/// 解析ツール用の 1 往復 (ドライバを通さず、開いた long コレクションへ直接)。
+/// `func` は関数番号 0..15、`params` は 16B まで。
+pub fn raw_request(
+    dev: &hidapi::HidDevice,
+    d: u8,
+    fi: u8,
+    func: u8,
+    sw: u8,
+    params: &[u8],
+) -> HubResult<[u8; 16]> {
+    let mut buf = [0u8; 64];
+    while matches!(dev.read_timeout(&mut buf, 0), Ok(n) if n > 0) {}
+    dev.write(&build_long(d, fi, func, sw, params))
+        .map_err(|e| HubError::Io(e.to_string()))?;
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    while Instant::now() < deadline {
+        let n = dev
+            .read_timeout(&mut buf, 100)
+            .map_err(|e| HubError::Io(e.to_string()))?;
+        if let Some(r) = match_reply(&buf[..n], d, fi, func, sw) {
+            return r.map_err(proto_err);
+        }
+    }
+    Err(HubError::Protocol("timeout".into()))
+}
+
 /// DeviceName.getDeviceType の値 → 名前。
 pub fn device_type_name(t: u8) -> &'static str {
     match t {
@@ -1633,22 +1659,7 @@ pub fn device_type_name(t: u8) -> &'static str {
 /// (書き込み・状態変更をする関数は呼ばない)。
 pub fn probe(dev: &hidapi::HidDevice, wireless: bool) -> HubResult<Vec<ProbeReport>> {
     let sw = 0x0E;
-    let rq = |d: u8, fi: u8, func: u8, params: &[u8]| -> HubResult<[u8; 16]> {
-        let mut buf = [0u8; 64];
-        while matches!(dev.read_timeout(&mut buf, 0), Ok(n) if n > 0) {}
-        dev.write(&build_long(d, fi, func, sw, params))
-            .map_err(|e| HubError::Io(e.to_string()))?;
-        let deadline = Instant::now() + REPLY_TIMEOUT;
-        while Instant::now() < deadline {
-            let n = dev
-                .read_timeout(&mut buf, 100)
-                .map_err(|e| HubError::Io(e.to_string()))?;
-            if let Some(r) = match_reply(&buf[..n], d, fi, func, sw) {
-                return r.map_err(proto_err);
-            }
-        }
-        Err(HubError::Protocol("timeout".into()))
-    };
+    let rq = |d: u8, fi: u8, func: u8, params: &[u8]| raw_request(dev, d, fi, func, sw, params);
     let cands: Vec<u8> = if wireless {
         (1..=6).collect()
     } else {
