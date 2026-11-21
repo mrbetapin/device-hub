@@ -534,6 +534,29 @@ pub fn open(
     Ok(LogiDriver { inner })
 }
 
+/// `DEVHUB_HIDPP_TRACE=<ファイル>` のとき、送受信と主要な判断を追記する (不具合調査用)。
+fn trace(msg: &str) {
+    use std::io::Write;
+    let Some(p) = std::env::var_os("DEVHUB_HIDPP_TRACE") else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() % 1_000_000)
+            .unwrap_or(0);
+        let th = format!("{:?}", std::thread::current().id());
+        let _ = writeln!(f, "{t:>6} {th:<14} {msg}");
+    }
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter()
+        .map(|x| format!("{x:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -565,12 +588,14 @@ impl Inner {
         let mut buf = [0u8; 64];
         while matches!(io.read_timeout(&mut buf, 0), Ok(n) if n > 0) {}
         let frame = build_long(dev, feat_idx, func, self.sw, params);
+        trace(&format!("-> {}", hex(&frame[1..])));
         io.write(&frame)
             .map_err(|e| HubError::Io(format!("hid++ write: {e}")))?;
         let deadline = Instant::now() + REPLY_TIMEOUT;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
+                trace("<- timeout");
                 return Err(HubError::Protocol(
                     "マウスが応答しません (スリープ中？マウスを動かして起こしてください)".into(),
                 ));
@@ -582,6 +607,10 @@ impl Inner {
                 continue;
             }
             if let Some(r) = match_reply(&buf[..n], dev, feat_idx, func, self.sw) {
+                match &r {
+                    Ok(p) => trace(&format!("<- {}", hex(p))),
+                    Err(e) => trace(&format!("<- ERR {e:?}")),
+                }
                 return r.map_err(proto_err);
             }
         }
@@ -926,6 +955,7 @@ impl Inner {
     }
 
     fn set_led(&self, zone: u8, st: &LightingState) -> HubResult<()> {
+        trace(&format!("set_led zone={zone} effect={} color={:?}", st.effect, st.color));
         let effect_id = lock(&self.feats)
             .as_ref()
             .and_then(|f| f.zones.iter().find(|z| z.index == zone).cloned())
@@ -1009,6 +1039,7 @@ impl Inner {
 
     /// 保存値をすべて書き込む。個々の失敗は続行 (ログだけ)。
     fn reapply(&self, s: &Saved) {
+        trace(&format!("reapply host={} lighting={:?}", s.host_mode, s.lighting.keys()));
         let f = lock(&self.feats).clone().unwrap_or_default();
         if !s.host_mode {
             if f.has_device_mode() {
@@ -1622,6 +1653,7 @@ impl DeviceDriver for LogiDriver {
 
     fn apply(&self, change: &Change) -> HubResult<()> {
         let inner = &self.inner;
+        trace(&format!("apply {change:?}"));
         if lock(&inner.feats).is_none() {
             inner.discover()?;
             inner.load_saved();
